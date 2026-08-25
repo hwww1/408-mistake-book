@@ -108,6 +108,25 @@ button:disabled { cursor: not-allowed; }
 .connect-empty button.secondary:hover { background: var(--green-soft); }
 .connect-empty small { margin-top: 13px; color: #94a099; font-size: 10px; }
 
+.modal-backdrop { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 22px; background: #10271f99; backdrop-filter: blur(5px); }
+.github-dialog { position: relative; width: min(520px, 100%); max-height: calc(100vh - 44px); overflow: auto; border-radius: 19px; background: #fff; padding: 30px; box-shadow: 0 24px 80px #06140e66; }
+.dialog-close { position: absolute; right: 17px; top: 14px; width: 34px; height: 34px; border: 0; border-radius: 50%; background: #f1f4f2; color: #617068; font-size: 22px; line-height: 1; }
+.dialog-kicker { color: var(--green); font-size: 10px; font-weight: 900; letter-spacing: .11em; }
+.github-dialog h2 { margin: 7px 0 9px; font-size: 22px; }
+.github-dialog > p { margin: 0; color: #66746d; font-size: 12px; line-height: 1.7; }
+.github-dialog ol { margin: 17px 0; padding-left: 22px; color: #4b5a52; font-size: 11px; line-height: 1.9; }
+.token-link { display: block; border: 1px solid #bad7c8; border-radius: 10px; background: var(--green-soft); color: var(--green); padding: 11px 14px; text-align: center; text-decoration: none; font-size: 12px; font-weight: 800; }
+.github-dialog label { display: block; margin: 20px 0 7px; color: #4e5c55; font-size: 11px; font-weight: 800; }
+.github-dialog input { width: 100%; border: 1px solid #d8e1dc; border-radius: 10px; background: #fbfcfb; padding: 12px; outline: 0; color: #233129; }
+.github-dialog input:focus { border-color: #4b9878; box-shadow: 0 0 0 3px #2d8d6920; }
+.github-error { margin-top: 10px; border-radius: 8px; background: #fff0ee; padding: 9px 11px; color: #a44940; font-size: 10px; line-height: 1.5; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.dialog-actions button { border-radius: 9px; padding: 10px 14px; font-size: 11px; font-weight: 800; }
+.dialog-cancel { border: 1px solid var(--line); background: #fff; color: #647169; }
+.dialog-connect { border: 0; background: var(--green); color: #fff; }
+.dialog-actions button:disabled { cursor: wait; opacity: .55; }
+.github-dialog > small { display: block; margin-top: 13px; color: #8d9992; font-size: 9px; line-height: 1.6; text-align: center; }
+
 .capture-head { display: flex; align-items: center; gap: 11px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
 .capture-icon { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 11px; background: var(--green-soft); color: var(--green); font-size: 22px; }
 .capture-icon.ready { background: var(--green); color: #fff; }
@@ -197,5 +216,9 @@ button:disabled { cursor: not-allowed; }
   .filterbar select { width: calc(50% - 5px); }
   .mistake-search { flex-basis: 100%; }
   .mistake-grid { grid-template-columns: 1fr; }
+  .github-dialog { padding: 25px 20px; }
+  .dialog-actions { flex-direction: column-reverse; }
+  .dialog-actions button { width: 100%; }
 }
+
 

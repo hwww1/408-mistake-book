@@ -24,6 +24,14 @@ type LocalDirectoryHandle = {
 
 type BrowserFile = File & { webkitRelativePath?: string };
 
+type GitHubContentItem = {
+  name: string;
+  path: string;
+  sha: string;
+  size: number;
+  type: 'file' | 'dir';
+};
+
 type PdfEntry = {
   id: string;
   name: string;
@@ -47,6 +55,11 @@ const SUBJECTS = [
 ];
 
 const REASONS = ['概念不清', '计算错误', '审题失误', '知识遗忘', '方法不熟', '其他'];
+const GITHUB_OWNER = 'hwww1';
+const GITHUB_REPO = '408-pdf-library';
+const GITHUB_BRANCH = 'main';
+const GITHUB_TOKEN_KEY = '408-private-repo-token';
+const GITHUB_TOKEN_URL = 'https://github.com/settings/personal-access-tokens/new?name=408%20PDF%20Library&description=Read-only%20access%20for%20408%20mistake%20book&target_name=hwww1&expires_in=45&contents=read';
 
 function parsePdf(parts: string[], handle: LocalFileHandle): PdfEntry {
   const subjectFolder = parts[0] || '';
@@ -73,6 +86,27 @@ function parsePdf(parts: string[], handle: LocalFileHandle): PdfEntry {
   };
 }
 
+function parseFlatPdf(fileName: string, relativePath: string, handle: LocalFileHandle, identity: string): PdfEntry {
+  const baseName = fileName.replace(/\.pdf$/i, '');
+  const matchedSubject = SUBJECTS.find((subject) => baseName.startsWith(subject.name));
+  const sectionMatch = baseName.match(/(?:^|_)(\d+)\.(\d+)_([^_]+)/);
+  const sectionNumber = sectionMatch ? `${sectionMatch[1]}.${sectionMatch[2]}` : '未分类';
+  const sectionTitle = sectionMatch?.[3] || '未分类小节';
+  const version = fileName.includes('PAD版') ? 'PAD版' : fileName.includes('做题版') ? '做题版' : 'PDF';
+
+  return {
+    id: identity,
+    name: fileName,
+    path: relativePath,
+    subject: matchedSubject?.name || '其他',
+    subjectCode: matchedSubject?.code || 'OT',
+    chapter: sectionMatch ? `第${Number(sectionMatch[1])}章` : '未分类章节',
+    section: `${sectionNumber} ${sectionTitle}`,
+    version,
+    handle,
+  };
+}
+
 function parseUploadedPdf(file: BrowserFile): PdfEntry {
   const relativePath = file.webkitRelativePath || file.name;
   let parts = relativePath.split(/[\\/]/).filter(Boolean);
@@ -89,24 +123,33 @@ function parseUploadedPdf(file: BrowserFile): PdfEntry {
     return parsePdf(parts, handle);
   }
 
-  const baseName = file.name.replace(/\.pdf$/i, '');
-  const matchedSubject = SUBJECTS.find((subject) => baseName.startsWith(subject.name));
-  const sectionMatch = baseName.match(/(?:^|_)(\d+)\.(\d+)_([^_]+)/);
-  const sectionNumber = sectionMatch ? `${sectionMatch[1]}.${sectionMatch[2]}` : '未分类';
-  const sectionTitle = sectionMatch?.[3] || '未分类小节';
-  const version = file.name.includes('PAD版') ? 'PAD版' : file.name.includes('做题版') ? '做题版' : 'PDF';
+  return parseFlatPdf(file.name, relativePath, handle, `${relativePath}:${file.size}:${file.lastModified}`);
+}
 
+function githubHeaders(token: string, raw = false): HeadersInit {
   return {
-    id: `${relativePath}:${file.size}:${file.lastModified}`,
-    name: file.name,
-    path: relativePath,
-    subject: matchedSubject?.name || '其他',
-    subjectCode: matchedSubject?.code || 'OT',
-    chapter: sectionMatch ? `第${Number(sectionMatch[1])}章` : '未分类章节',
-    section: `${sectionNumber} ${sectionTitle}`,
-    version,
-    handle,
+    Accept: raw ? 'application/vnd.github.raw+json' : 'application/vnd.github+json',
+    Authorization: `Bearer ${token}`,
+    'X-GitHub-Api-Version': '2022-11-28',
   };
+}
+
+function parseGitHubPdf(item: GitHubContentItem, token: string): PdfEntry {
+  const encodedPath = item.path.split('/').map(encodeURIComponent).join('/');
+  const handle: LocalFileHandle = {
+    kind: 'file',
+    name: item.name,
+    getFile: async () => {
+      const response = await fetch(
+        `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${encodedPath}?ref=${GITHUB_BRANCH}`,
+        { headers: githubHeaders(token, true) },
+      );
+      if (!response.ok) throw new Error(`GitHub PDF request failed: ${response.status}`);
+      const blob = await response.blob();
+      return new File([blob], item.name, { type: 'application/pdf' });
+    },
+  };
+  return parseFlatPdf(item.name, item.path, handle, `github:${item.sha}`);
 }
 
 async function scanFolder(root: LocalDirectoryHandle): Promise<PdfEntry[]> {
@@ -182,6 +225,10 @@ export default function Home() {
   const [filterStatus, setFilterStatus] = useState('待掌握');
   const [search, setSearch] = useState('');
   const [sidebarSearch, setSidebarSearch] = useState('');
+  const [githubDialogOpen, setGithubDialogOpen] = useState(false);
+  const [githubTokenDraft, setGithubTokenDraft] = useState('');
+  const [githubConnecting, setGithubConnecting] = useState(false);
+  const [githubError, setGithubError] = useState('');
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const canvasBoxRef = useRef<HTMLDivElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -227,6 +274,11 @@ export default function Home() {
       }
     }).catch(() => undefined);
   }, [loadRoot, refreshMistakes]);
+
+  useEffect(() => {
+    const savedToken = window.sessionStorage.getItem(GITHUB_TOKEN_KEY);
+    if (savedToken) void connectGitHubRepo(savedToken, true);
+  }, []);
 
   useEffect(() => {
     if (!toast) return;
@@ -332,6 +384,58 @@ export default function Home() {
     const rootName = firstFile?.webkitRelativePath?.split(/[\\/]/)[0];
     activateFiles(files, rootName || `${files.length} 个 PDF`);
     setToast(fromFolder ? `已读取 ${files.length} 个 PDF` : `已选择 ${files.length} 个 PDF`);
+  }
+
+  function openGitHubDialog() {
+    setGithubTokenDraft(window.sessionStorage.getItem(GITHUB_TOKEN_KEY) || '');
+    setGithubError('');
+    setGithubDialogOpen(true);
+  }
+
+  async function connectGitHubRepo(tokenInput = githubTokenDraft, silent = false) {
+    const token = tokenInput.trim();
+    if (!token) {
+      setGithubError('请先粘贴 GitHub 只读访问令牌。');
+      setGithubDialogOpen(true);
+      return;
+    }
+
+    setGithubConnecting(true);
+    setGithubError('');
+    if (!silent) setReaderMessage('正在连接私有 PDF 仓库…');
+    try {
+      const response = await fetch(
+        `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents?ref=${GITHUB_BRANCH}`,
+        { headers: githubHeaders(token) },
+      );
+      if (!response.ok) {
+        if (response.status === 401) throw new Error('令牌无效或已过期，请重新创建。');
+        if (response.status === 403) throw new Error('令牌没有读取权限，创建时请把 Contents 设为 Read-only。');
+        if (response.status === 404) throw new Error('令牌没有选中 408-pdf-library 仓库。');
+        throw new Error(`GitHub 暂时无法连接（${response.status}）。`);
+      }
+
+      const payload = await response.json() as GitHubContentItem[];
+      const files = payload
+        .filter((item) => item.type === 'file' && item.name.toLowerCase().endsWith('.pdf'))
+        .map((item) => parseGitHubPdf(item, token))
+        .sort((a, b) => a.path.localeCompare(b.path, 'zh-CN'));
+      if (!files.length) throw new Error('私有仓库中没有找到 PDF。');
+
+      window.sessionStorage.setItem(GITHUB_TOKEN_KEY, token);
+      activateFiles(files, `GitHub 私有仓库 · ${files.length} 个 PDF`);
+      setGithubDialogOpen(false);
+      setGithubTokenDraft('');
+      setToast(`已连接私有仓库，共 ${files.length} 个 PDF`);
+    } catch (error) {
+      const message = (error as Error).message || '连接失败，请稍后重试。';
+      setGithubError(message);
+      setGithubDialogOpen(true);
+      window.sessionStorage.removeItem(GITHUB_TOKEN_KEY);
+      if (silent) setReaderMessage('私有仓库连接已失效，请重新连接');
+    } finally {
+      setGithubConnecting(false);
+    }
   }
 
   function chooseSubject(code: string) {
@@ -512,7 +616,7 @@ export default function Home() {
           <span><b>408 错题收集器</b><small>框选题目，一键加入错题本</small></span>
         </button>
         <div className="top-actions">
-          <span className="privacy-pill"><i />仅保存在本机</span>
+          <span className="privacy-pill"><i />错题本地保存 · PDF 私有读取</span>
           <button className={view === 'mistakes' ? 'ghost-button active' : 'ghost-button'} onClick={() => setView(view === 'reader' ? 'mistakes' : 'reader')}>
             {view === 'reader' ? '我的错题' : '返回练习册'} <b>{mistakes.length}</b>
           </button>
@@ -522,9 +626,9 @@ export default function Home() {
       {view === 'reader' ? (
         <div className="workspace">
           <aside className="sidebar">
-            <button className="folder-button" onClick={connectFolder}>
+            <button className="folder-button" onClick={entries.length ? connectFolder : openGitHubDialog}>
               <span className="folder-icon" />
-              <span><b>{connectedName ? '练习册已连接' : '选择练习册或 PDF'}</b>{connectedName && <small>{connectedName}</small>}</span>
+              <span><b>{connectedName ? '练习册已连接' : '连接私有 PDF 仓库'}</b>{connectedName && <small>{connectedName}</small>}</span>
             </button>
             <p className="sidebar-label">四科目录</p>
             <nav className="subject-grid" aria-label="科目目录">
@@ -544,7 +648,7 @@ export default function Home() {
 
           <section className="reader-panel">
             <div className="reader-toolbar">
-              <div><span className="crumb">{selectedEntry ? `${selectedEntry.subject} / ${selectedEntry.chapter}` : '等待连接练习册'}</span><strong>{selectedEntry ? `${selectedEntry.section} · ${selectedEntry.version}` : '请选择 D:\\408\\按章节整理'}</strong></div>
+              <div><span className="crumb">{selectedEntry ? `${selectedEntry.subject} / ${selectedEntry.chapter}` : '等待连接练习册'}</span><strong>{selectedEntry ? `${selectedEntry.section} · ${selectedEntry.version}` : '请连接私有仓库或选择本地 PDF'}</strong></div>
               <div className="page-controls">
                 <button disabled={pageNumber <= 1} onClick={() => setPageNumber((page) => Math.max(1, page - 1))} aria-label="上一页">‹</button>
                 <span>第 <b>{pageNumber}</b> / {pageCount || '—'} 页</span>
@@ -553,7 +657,7 @@ export default function Home() {
               </div>
             </div>
             <div className="document-stage">
-              {!selectedEntry ? <div className="connect-empty"><div className="empty-icon"><span /></div><h2>连接你的分节练习册</h2><p>推荐选择 <b>D:\408\按章节整理</b>，也可以直接多选 PDF</p><div className="connect-actions"><button onClick={connectFolder}>选择整个文件夹</button><button className="secondary" onClick={() => pdfInputRef.current?.click()}>选择 PDF 文件</button></div><small>文件只在当前电脑读取，不会上传到 GitHub；刷新页面后需要重新选择</small></div> : <div className="canvas-wrap" ref={canvasBoxRef} onPointerDown={beginSelection} onPointerMove={moveSelection} onPointerUp={endSelection} onPointerCancel={endSelection}><canvas ref={canvasRef} />{activeRect && <div className={`selection-box ${selection ? 'done' : ''}`} style={{ left: activeRect.x, top: activeRect.y, width: activeRect.width, height: activeRect.height }}><span>{selection ? '已框选' : '松开完成'}</span></div>}{readerMessage && <div className="reader-message"><i />{readerMessage}</div>}</div>}
+              {!selectedEntry ? <div className="connect-empty"><div className="empty-icon"><span /></div><h2>连接你的分节练习册</h2><p>换电脑也能用：直接读取你的 GitHub 私有 PDF 仓库</p><div className="connect-actions"><button onClick={openGitHubDialog}>连接私有 PDF 仓库</button><button className="secondary" onClick={connectFolder}>选择本地文件夹</button><button className="secondary" onClick={() => pdfInputRef.current?.click()}>选择 PDF 文件</button></div><small>访问令牌只保留在当前浏览器标签页；错题仍保存在本机</small></div> : <div className="canvas-wrap" ref={canvasBoxRef} onPointerDown={beginSelection} onPointerMove={moveSelection} onPointerUp={endSelection} onPointerCancel={endSelection}><canvas ref={canvasRef} />{activeRect && <div className={`selection-box ${selection ? 'done' : ''}`} style={{ left: activeRect.x, top: activeRect.y, width: activeRect.width, height: activeRect.height }}><span>{selection ? '已框选' : '松开完成'}</span></div>}{readerMessage && <div className="reader-message"><i />{readerMessage}</div>}</div>}
             </div>
           </section>
 
@@ -576,8 +680,28 @@ export default function Home() {
           {filteredMistakes.length ? <div className="mistake-grid">{filteredMistakes.map((mistake) => <article className={mistake.mastered ? 'mistake-card mastered' : 'mistake-card'} key={mistake.id}><div className="mistake-image"><MistakeImage image={mistake.image} alt={`${mistake.section} 第${mistake.questionNo || ''}题`} />{mistake.mastered && <span>已掌握</span>}</div><div className="mistake-body"><div className="mistake-tags"><span>{mistake.subjectCode}</span><span>{mistake.section.split(' ')[0]}</span><span>第{mistake.page}页</span></div><h3>{mistake.questionNo ? `第 ${mistake.questionNo} 题` : '未填写题号'} · {mistake.reason}</h3><p className="mistake-path">{mistake.chapter} / {mistake.section}</p>{mistake.note && <p className="mistake-note">{mistake.note}</p>}<div className="mistake-actions"><button onClick={() => toggleMastered(mistake)}>{mistake.mastered ? '标记为待复习' : '✓ 我已掌握'}</button><button className="delete-button" onClick={() => deleteMistake(mistake)}>删除</button></div></div></article>)}</div> : <div className="mistakes-empty"><div>✓</div><h3>{mistakes.length ? '没有符合条件的错题' : '错题本还是空的'}</h3><p>{mistakes.length ? '换一个筛选条件再看看。' : '返回练习册，拖动框选题目后点击“加入错题本”。'}</p><button onClick={() => setView('reader')}>返回练习册</button></div>}
         </section>
       )}
+      {githubDialogOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !githubConnecting) setGithubDialogOpen(false); }}>
+        <section className="github-dialog" role="dialog" aria-modal="true" aria-labelledby="github-dialog-title">
+          <button className="dialog-close" onClick={() => setGithubDialogOpen(false)} disabled={githubConnecting} aria-label="关闭">×</button>
+          <span className="dialog-kicker">第一次使用只需设置一次</span>
+          <h2 id="github-dialog-title">连接私有 PDF 仓库</h2>
+          <p>创建一个只允许读取 <b>{GITHUB_REPO}</b> 的访问令牌，网页就能按章节加载 PDF。</p>
+          <ol>
+            <li>点下面的按钮，在 GitHub 选择 <b>Only select repositories</b></li>
+            <li>只勾选 <b>{GITHUB_REPO}</b>，并保持 <b>Contents: Read-only</b></li>
+            <li>创建后复制令牌，粘贴到这里</li>
+          </ol>
+          <a className="token-link" href={GITHUB_TOKEN_URL} target="_blank" rel="noreferrer">创建只读访问令牌 ↗</a>
+          <label htmlFor="github-token">GitHub 访问令牌</label>
+          <input id="github-token" type="password" value={githubTokenDraft} onChange={(event) => setGithubTokenDraft(event.target.value)} placeholder="github_pat_…" autoComplete="off" onKeyDown={(event) => { if (event.key === 'Enter' && !githubConnecting) void connectGitHubRepo(); }} />
+          {githubError && <div className="github-error">{githubError}</div>}
+          <div className="dialog-actions"><button className="dialog-cancel" onClick={() => setGithubDialogOpen(false)} disabled={githubConnecting}>取消</button><button className="dialog-connect" onClick={() => void connectGitHubRepo()} disabled={githubConnecting}>{githubConnecting ? '正在连接…' : '连接并打开练习册'}</button></div>
+          <small>令牌只保存在当前标签页，不会写进网页代码，也不会上传到其他地方。</small>
+        </section>
+      </div>}
       {toast && <div className="toast">✓ {toast}</div>}
     </main>
   );
 }
+
 
