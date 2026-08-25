@@ -13,7 +13,7 @@ type LocalFileHandle = {
   kind: 'file';
   name: string;
   getFile: () => Promise<File>;
-  getData?: (signal: AbortSignal) => Promise<ArrayBuffer>;
+  getPdfSource?: () => { url: string; httpHeaders: Record<string, string> };
 };
 
 type LocalDirectoryHandle = {
@@ -127,7 +127,7 @@ function parseUploadedPdf(file: BrowserFile): PdfEntry {
   return parseFlatPdf(file.name, relativePath, handle, `${relativePath}:${file.size}:${file.lastModified}`);
 }
 
-function githubHeaders(token: string, raw = false): HeadersInit {
+function githubHeaders(token: string, raw = false): Record<string, string> {
   return {
     Accept: raw ? 'application/vnd.github.raw+json' : 'application/vnd.github+json',
     Authorization: `Bearer ${token}`,
@@ -140,14 +140,10 @@ function parseGitHubPdf(item: GitHubContentItem, token: string): PdfEntry {
   const handle: LocalFileHandle = {
     kind: 'file',
     name: item.name,
-    getData: async (signal) => {
-      const response = await fetch(
-        `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${encodedPath}?ref=${GITHUB_BRANCH}`,
-        { headers: githubHeaders(token, true), signal },
-      );
-      if (!response.ok) throw new Error(`GitHub PDF request failed: ${response.status}`);
-      return response.arrayBuffer();
-    },
+    getPdfSource: () => ({
+      url: `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${encodedPath}?ref=${GITHUB_BRANCH}`,
+      httpHeaders: githubHeaders(token, true),
+    }),
     getFile: async () => {
       const response = await fetch(
         `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${encodedPath}?ref=${GITHUB_BRANCH}`,
@@ -246,6 +242,7 @@ export default function Home() {
   const backupInputRef = useRef<HTMLInputElement>(null);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
   const renderToken = useRef(0);
+  const pdfDocumentRef = useRef<any>(null);
 
   const refreshMistakes = useCallback(async () => {
     setMistakes(await listMistakes());
@@ -301,7 +298,8 @@ export default function Home() {
     let cancelled = false;
     let loadingTask: any = null;
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort('timeout'), 45_000);
+    let timedOut = false;
+    let timeout = 0;
     renderToken.current += 1;
     setSelection(null);
     setDraftSelection(null);
@@ -309,36 +307,50 @@ export default function Home() {
     setPageCount(0);
     setReaderMessage('正在打开 PDF…');
 
-    setPdfDocument((current: any) => {
-      if (current) current.destroy().catch(() => undefined);
-      return null;
-    });
+    setPdfDocument(null);
     const canvas = canvasRef.current;
     if (canvas) {
       canvas.width = 0;
       canvas.height = 0;
     }
 
-    const getData = selectedEntry.handle.getData
-      ? selectedEntry.handle.getData(controller.signal)
-      : selectedEntry.handle.getFile().then((file) => file.arrayBuffer());
-
-    getData.then(async (data) => {
+    const loadDocument = async () => {
+      const previousDocument = pdfDocumentRef.current;
+      pdfDocumentRef.current = null;
+      if (previousDocument) await previousDocument.destroy().catch(() => undefined);
       if (cancelled) return;
+
       const pdfjs = await import('pdfjs-dist/build/pdf.mjs');
       pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
-      loadingTask = pdfjs.getDocument({ data });
+      const remoteSource = selectedEntry.handle.getPdfSource?.();
+      if (remoteSource) {
+        loadingTask = pdfjs.getDocument({ ...remoteSource, rangeChunkSize: 256 * 1024 });
+      } else {
+        const file = await selectedEntry.handle.getFile();
+        if (cancelled) return;
+        loadingTask = pdfjs.getDocument({ data: await file.arrayBuffer() });
+      }
+
+      timeout = window.setTimeout(() => {
+        timedOut = true;
+        controller.abort('timeout');
+        if (loadingTask) loadingTask.destroy().catch(() => undefined);
+      }, 45_000);
       const document = await loadingTask.promise;
+      loadingTask = null;
       if (cancelled) {
         await (document as any).destroy();
         return;
       }
+      pdfDocumentRef.current = document;
       setPdfDocument(document);
       setPageCount(document.numPages);
       setReaderMessage('');
-    }).catch((error) => {
+    };
+
+    loadDocument().catch((error) => {
       if (cancelled) return;
-      if (controller.signal.aborted) {
+      if (timedOut) {
         setReaderMessage('下载超过 45 秒，已停止。请检查网络后再点一次该章节');
       } else {
         setReaderMessage(`这个 PDF 没有成功打开${error instanceof Error && error.message.includes('401') ? '，请重新连接私有仓库' : '，请再点一次该章节'}`);
