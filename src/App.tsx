@@ -22,6 +22,8 @@ type LocalDirectoryHandle = {
   queryPermission?: (options: { mode: 'read' }) => Promise<'granted' | 'denied' | 'prompt'>;
 };
 
+type BrowserFile = File & { webkitRelativePath?: string };
+
 type PdfEntry = {
   id: string;
   name: string;
@@ -66,6 +68,42 @@ function parsePdf(parts: string[], handle: LocalFileHandle): PdfEntry {
     subjectCode,
     chapter,
     section,
+    version,
+    handle,
+  };
+}
+
+function parseUploadedPdf(file: BrowserFile): PdfEntry {
+  const relativePath = file.webkitRelativePath || file.name;
+  let parts = relativePath.split(/[\\/]/).filter(Boolean);
+  const subjectFolderIndex = parts.findIndex((part) => /^\d+_[A-Z]+_/.test(part));
+  if (subjectFolderIndex > 0) parts = parts.slice(subjectFolderIndex);
+
+  const handle: LocalFileHandle = {
+    kind: 'file',
+    name: file.name,
+    getFile: async () => file,
+  };
+
+  if (parts.length >= 4 && /^\d+_[A-Z]+_/.test(parts[0])) {
+    return parsePdf(parts, handle);
+  }
+
+  const baseName = file.name.replace(/\.pdf$/i, '');
+  const matchedSubject = SUBJECTS.find((subject) => baseName.startsWith(subject.name));
+  const sectionMatch = baseName.match(/(?:^|_)(\d+)\.(\d+)_([^_]+)/);
+  const sectionNumber = sectionMatch ? `${sectionMatch[1]}.${sectionMatch[2]}` : '未分类';
+  const sectionTitle = sectionMatch?.[3] || '未分类小节';
+  const version = file.name.includes('PAD版') ? 'PAD版' : file.name.includes('做题版') ? '做题版' : 'PDF';
+
+  return {
+    id: `${relativePath}:${file.size}:${file.lastModified}`,
+    name: file.name,
+    path: relativePath,
+    subject: matchedSubject?.name || '其他',
+    subjectCode: matchedSubject?.code || 'OT',
+    chapter: sectionMatch ? `第${Number(sectionMatch[1])}章` : '未分类章节',
+    section: `${sectionNumber} ${sectionTitle}`,
     version,
     handle,
   };
@@ -146,6 +184,8 @@ export default function Home() {
   const [sidebarSearch, setSidebarSearch] = useState('');
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const canvasBoxRef = useRef<HTMLDivElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const pdfInputRef = useRef<HTMLInputElement>(null);
   const backupInputRef = useRef<HTMLInputElement>(null);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
   const renderToken = useRef(0);
@@ -154,11 +194,9 @@ export default function Home() {
     setMistakes(await listMistakes());
   }, []);
 
-  const loadRoot = useCallback(async (root: LocalDirectoryHandle) => {
-    setReaderMessage('正在读取分节练习册…');
-    const files = await scanFolder(root);
+  const activateFiles = useCallback((files: PdfEntry[], label: string) => {
     setEntries(files);
-    setConnectedName(root.name);
+    setConnectedName(label);
     const first = files.find((file) => file.subjectCode === activeSubject && file.version === '做题版') || files[0];
     if (first) {
       setActiveSubject(first.subjectCode);
@@ -168,6 +206,17 @@ export default function Home() {
       setReaderMessage('这个文件夹中没有找到 PDF');
     }
   }, [activeSubject]);
+
+  const loadRoot = useCallback(async (root: LocalDirectoryHandle) => {
+    setReaderMessage('正在读取分节练习册…');
+    const files = await scanFolder(root);
+    activateFiles(files, root.name);
+  }, [activateFiles]);
+
+  useEffect(() => {
+    folderInputRef.current?.setAttribute('webkitdirectory', '');
+    folderInputRef.current?.setAttribute('directory', '');
+  }, []);
 
   useEffect(() => {
     refreshMistakes();
@@ -255,7 +304,7 @@ export default function Home() {
       showDirectoryPicker?: (options?: { mode: 'read' }) => Promise<LocalDirectoryHandle>;
     }).showDirectoryPicker;
     if (!picker) {
-      window.alert('请使用最新版 Microsoft Edge 或 Chrome 打开。');
+      folderInputRef.current?.click();
       return;
     }
     try {
@@ -266,6 +315,23 @@ export default function Home() {
     } catch (error) {
       if ((error as Error)?.name !== 'AbortError') window.alert('没有成功读取文件夹，请重新选择。');
     }
+  }
+
+  function connectPdfFiles(fileList: FileList | null, fromFolder: boolean) {
+    const files = Array.from(fileList || [])
+      .filter((file) => file.name.toLowerCase().endsWith('.pdf'))
+      .map((file) => parseUploadedPdf(file as BrowserFile))
+      .sort((a, b) => a.path.localeCompare(b.path, 'zh-CN'));
+
+    if (!files.length) {
+      window.alert('没有选到 PDF，请重新选择。');
+      return;
+    }
+
+    const firstFile = (fileList?.[0] as BrowserFile | undefined);
+    const rootName = firstFile?.webkitRelativePath?.split(/[\\/]/)[0];
+    activateFiles(files, rootName || `${files.length} 个 PDF`);
+    setToast(fromFolder ? `已读取 ${files.length} 个 PDF` : `已选择 ${files.length} 个 PDF`);
   }
 
   function chooseSubject(code: string) {
@@ -438,6 +504,8 @@ export default function Home() {
 
   return (
     <main className="app-shell">
+      <input ref={folderInputRef} className="file-input" type="file" accept="application/pdf,.pdf" multiple onChange={(event) => { connectPdfFiles(event.target.files, true); event.target.value = ''; }} />
+      <input ref={pdfInputRef} className="file-input" type="file" accept="application/pdf,.pdf" multiple onChange={(event) => { connectPdfFiles(event.target.files, false); event.target.value = ''; }} />
       <header className="topbar">
         <button className="brand" onClick={() => setView('reader')} aria-label="返回练习册">
           <span className="brand-mark">错</span>
@@ -456,7 +524,7 @@ export default function Home() {
           <aside className="sidebar">
             <button className="folder-button" onClick={connectFolder}>
               <span className="folder-icon" />
-              <span><b>{connectedName ? '练习册已连接' : '选择练习册文件夹'}</b>{connectedName && <small>{connectedName}</small>}</span>
+              <span><b>{connectedName ? '练习册已连接' : '选择练习册或 PDF'}</b>{connectedName && <small>{connectedName}</small>}</span>
             </button>
             <p className="sidebar-label">四科目录</p>
             <nav className="subject-grid" aria-label="科目目录">
@@ -485,7 +553,7 @@ export default function Home() {
               </div>
             </div>
             <div className="document-stage">
-              {!selectedEntry ? <div className="connect-empty"><div className="empty-icon"><span /></div><h2>连接你的分节练习册</h2><p>点击下方按钮，选择 <b>D:\408\按章节整理</b></p><button onClick={connectFolder}>选择练习册文件夹</button><small>只读取 PDF，文件不会被上传或修改</small></div> : <div className="canvas-wrap" ref={canvasBoxRef} onPointerDown={beginSelection} onPointerMove={moveSelection} onPointerUp={endSelection} onPointerCancel={endSelection}><canvas ref={canvasRef} />{activeRect && <div className={`selection-box ${selection ? 'done' : ''}`} style={{ left: activeRect.x, top: activeRect.y, width: activeRect.width, height: activeRect.height }}><span>{selection ? '已框选' : '松开完成'}</span></div>}{readerMessage && <div className="reader-message"><i />{readerMessage}</div>}</div>}
+              {!selectedEntry ? <div className="connect-empty"><div className="empty-icon"><span /></div><h2>连接你的分节练习册</h2><p>推荐选择 <b>D:\408\按章节整理</b>，也可以直接多选 PDF</p><div className="connect-actions"><button onClick={connectFolder}>选择整个文件夹</button><button className="secondary" onClick={() => pdfInputRef.current?.click()}>选择 PDF 文件</button></div><small>文件只在当前电脑读取，不会上传到 GitHub；刷新页面后需要重新选择</small></div> : <div className="canvas-wrap" ref={canvasBoxRef} onPointerDown={beginSelection} onPointerMove={moveSelection} onPointerUp={endSelection} onPointerCancel={endSelection}><canvas ref={canvasRef} />{activeRect && <div className={`selection-box ${selection ? 'done' : ''}`} style={{ left: activeRect.x, top: activeRect.y, width: activeRect.width, height: activeRect.height }}><span>{selection ? '已框选' : '松开完成'}</span></div>}{readerMessage && <div className="reader-message"><i />{readerMessage}</div>}</div>}
             </div>
           </section>
 
@@ -512,3 +580,4 @@ export default function Home() {
     </main>
   );
 }
+

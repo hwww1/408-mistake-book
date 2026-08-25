@@ -14,6 +14,7 @@ button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; }
 .app-shell { min-height: 100vh; }
+.file-input { display: none; }
 
 .topbar { height: 76px; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; border-bottom: 1px solid var(--line); background: #fff; }
 .brand { display: flex; align-items: center; gap: 12px; padding: 0; border: 0; background: transparent; text-align: left; color: inherit; }
@@ -102,6 +103,9 @@ button:disabled { cursor: not-allowed; }
 .connect-empty h2 { margin: 0; font-size: 20px; }
 .connect-empty p { margin: 9px 0 19px; color: #728078; font-size: 12px; }
 .connect-empty button, .mistakes-empty button { border: 0; border-radius: 10px; background: var(--green); color: #fff; padding: 11px 18px; font-weight: 700; box-shadow: 0 8px 20px #176b4c32; }
+.connect-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 9px; }
+.connect-empty button.secondary { border: 1px solid #bdd4c8; background: #fff; color: var(--green); box-shadow: none; }
+.connect-empty button.secondary:hover { background: var(--green-soft); }
 .connect-empty small { margin-top: 13px; color: #94a099; font-size: 10px; }
 
 .capture-head { display: flex; align-items: center; gap: 11px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
@@ -194,3 +198,4 @@ button:disabled { cursor: not-allowed; }
   .mistake-search { flex-basis: 100%; }
   .mistake-grid { grid-template-columns: 1fr; }
 }
+
