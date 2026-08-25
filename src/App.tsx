@@ -13,6 +13,7 @@ type LocalFileHandle = {
   kind: 'file';
   name: string;
   getFile: () => Promise<File>;
+  getData?: (signal: AbortSignal) => Promise<ArrayBuffer>;
 };
 
 type LocalDirectoryHandle = {
@@ -139,6 +140,14 @@ function parseGitHubPdf(item: GitHubContentItem, token: string): PdfEntry {
   const handle: LocalFileHandle = {
     kind: 'file',
     name: item.name,
+    getData: async (signal) => {
+      const response = await fetch(
+        `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${encodedPath}?ref=${GITHUB_BRANCH}`,
+        { headers: githubHeaders(token, true), signal },
+      );
+      if (!response.ok) throw new Error(`GitHub PDF request failed: ${response.status}`);
+      return response.arrayBuffer();
+    },
     getFile: async () => {
       const response = await fetch(
         `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${encodedPath}?ref=${GITHUB_BRANCH}`,
@@ -289,26 +298,58 @@ export default function Home() {
   useEffect(() => {
     if (!selectedEntry) return;
     let cancelled = false;
+    let loadingTask: any = null;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort('timeout'), 45_000);
+    renderToken.current += 1;
     setSelection(null);
     setDraftSelection(null);
     setPageNumber(1);
+    setPageCount(0);
     setReaderMessage('正在打开 PDF…');
-    selectedEntry.handle.getFile().then((file) => file.arrayBuffer()).then(async (data) => {
+
+    setPdfDocument((current: any) => {
+      if (current) current.destroy().catch(() => undefined);
+      return null;
+    });
+    const canvas = canvasRef.current;
+    if (canvas) {
+      canvas.width = 0;
+      canvas.height = 0;
+    }
+
+    const getData = selectedEntry.handle.getData
+      ? selectedEntry.handle.getData(controller.signal)
+      : selectedEntry.handle.getFile().then((file) => file.arrayBuffer());
+
+    getData.then(async (data) => {
+      if (cancelled) return;
       const pdfjs = await import('pdfjs-dist/build/pdf.mjs');
       pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
-      const document = await pdfjs.getDocument({ data }).promise;
+      loadingTask = pdfjs.getDocument({ data });
+      const document = await loadingTask.promise;
       if (cancelled) {
         await (document as any).destroy();
         return;
       }
-      setPdfDocument((current: any) => {
-        if (current) current.destroy().catch(() => undefined);
-        return document;
-      });
+      setPdfDocument(document);
       setPageCount(document.numPages);
       setReaderMessage('');
-    }).catch(() => setReaderMessage('这个 PDF 没有成功打开，请换一个文件试试'));
-    return () => { cancelled = true; };
+    }).catch((error) => {
+      if (cancelled) return;
+      if (controller.signal.aborted) {
+        setReaderMessage('下载超过 45 秒，已停止。请检查网络后再点一次该章节');
+      } else {
+        setReaderMessage(`这个 PDF 没有成功打开${error instanceof Error && error.message.includes('401') ? '，请重新连接私有仓库' : '，请再点一次该章节'}`);
+      }
+    }).finally(() => window.clearTimeout(timeout));
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+      controller.abort('chapter-changed');
+      if (loadingTask) loadingTask.destroy().catch(() => undefined);
+    };
   }, [selectedEntry]);
 
   useEffect(() => {
