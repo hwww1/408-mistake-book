@@ -46,6 +46,7 @@ type PdfEntry = {
 };
 
 type Rect = { x: number; y: number; width: number; height: number };
+type QuestionRegion = Rect & { index: number };
 type View = 'reader' | 'mistakes';
 
 const SUBJECTS = [
@@ -199,6 +200,172 @@ function escapeHtml(value: string) {
   })[character] || character);
 }
 
+function displayQuestionNo(value: string) {
+  if (!value) return '未填写题号';
+  return value.includes('本页第') ? value : `第 ${value} 题`;
+}
+
+function detectQuestionRegions(canvas: HTMLCanvasElement): QuestionRegion[] {
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context || !canvas.width || !canvas.height) return [];
+  const { width, height } = canvas;
+  const pixels = context.getImageData(0, 0, width, height).data;
+  const isDark = (x: number, y: number) => {
+    const offset = (y * width + x) * 4;
+    return pixels[offset] < 170 && pixels[offset + 1] < 170 && pixels[offset + 2] < 170;
+  };
+
+  const xScanStart = Math.floor(width * 0.06);
+  const xScanEnd = Math.floor(width * 0.34);
+  const yScanStart = Math.floor(height * 0.07);
+  const yScanEnd = Math.floor(height * 0.92);
+  const rawLines: Array<[number, number]> = [];
+  let lineStart = -1;
+  for (let y = yScanStart; y < yScanEnd; y += 1) {
+    let ink = 0;
+    for (let x = xScanStart; x < xScanEnd; x += 1) {
+      if (isDark(x, y) && ++ink > 2) break;
+    }
+    if (ink > 2 && lineStart < 0) lineStart = y;
+    if (ink <= 2 && lineStart >= 0) {
+      if (y - lineStart > 2) rawLines.push([lineStart, y - 1]);
+      lineStart = -1;
+    }
+  }
+
+  // Keep wrapped question text as separate lines at PDF.js' lower browser
+  // resolution; otherwise a two-line stem can make its leading number look
+  // too short and get skipped.
+  const mergeGap = Math.max(3, Math.round(height * 0.003));
+  const lines: Array<[number, number]> = [];
+  rawLines.forEach(([start, end]) => {
+    const previous = lines[lines.length - 1];
+    if (previous && start - previous[1] <= mergeGap) previous[1] = end;
+    else lines.push([start, end]);
+  });
+
+  type Component = { minX: number; maxX: number; minY: number; maxY: number; area: number };
+  function componentsIn(startY: number, endY: number, startX: number, endX: number): Component[] {
+    const cropWidth = Math.max(0, endX - startX + 1);
+    const cropHeight = Math.max(0, endY - startY + 1);
+    const seen = new Uint8Array(cropWidth * cropHeight);
+    const components: Component[] = [];
+    const stack: number[] = [];
+
+    for (let localY = 0; localY < cropHeight; localY += 1) {
+      for (let localX = 0; localX < cropWidth; localX += 1) {
+        const seed = localY * cropWidth + localX;
+        if (seen[seed] || !isDark(startX + localX, startY + localY)) continue;
+        seen[seed] = 1;
+        stack.push(seed);
+        let minX = localX; let maxX = localX; let minY = localY; let maxY = localY; let area = 0;
+        while (stack.length) {
+          const current = stack.pop() as number;
+          const currentY = Math.floor(current / cropWidth);
+          const currentX = current % cropWidth;
+          area += 1;
+          minX = Math.min(minX, currentX); maxX = Math.max(maxX, currentX);
+          minY = Math.min(minY, currentY); maxY = Math.max(maxY, currentY);
+          for (let dy = -1; dy <= 1; dy += 1) {
+            for (let dx = -1; dx <= 1; dx += 1) {
+              const nextX = currentX + dx; const nextY = currentY + dy;
+              if (nextX < 0 || nextY < 0 || nextX >= cropWidth || nextY >= cropHeight) continue;
+              const next = nextY * cropWidth + nextX;
+              if (!seen[next] && isDark(startX + nextX, startY + nextY)) {
+                seen[next] = 1;
+                stack.push(next);
+              }
+            }
+          }
+        }
+        if (area >= 2) components.push({ minX: minX + startX, maxX: maxX + startX, minY: minY + startY, maxY: maxY + startY, area });
+      }
+    }
+    return components.sort((a, b) => a.minX - b.minX);
+  }
+
+  const starts: number[] = [];
+  let pendingKnowledgeHeading: number | null = null;
+  let lastContentEnd = yScanStart;
+  lines.forEach(([start, end]) => {
+    lastContentEnd = Math.max(lastContentEnd, end);
+    let left = xScanEnd;
+    for (let y = start; y <= end; y += 1) {
+      for (let x = xScanStart; x < xScanEnd; x += 1) {
+        if (isDark(x, y)) { left = Math.min(left, x); break; }
+      }
+    }
+    if (left > width * 0.096) return;
+
+    const components = componentsIn(start, end, left, Math.min(width - 1, left + Math.round(width * 0.065)))
+      .reduce<Component[]>((merged, component) => {
+        const previous = merged[merged.length - 1];
+        if (previous && component.minX <= previous.maxX) {
+          previous.minX = Math.min(previous.minX, component.minX);
+          previous.maxX = Math.max(previous.maxX, component.maxX);
+          previous.minY = Math.min(previous.minY, component.minY);
+          previous.maxY = Math.max(previous.maxY, component.maxY);
+          previous.area += component.area;
+        } else merged.push({ ...component });
+        return merged;
+      }, []);
+    const lineHeight = end - start + 1;
+    const isSmallDot = (component: Component) => {
+      const componentHeight = component.maxY - component.minY + 1;
+      const componentWidth = component.maxX - component.minX + 1;
+      return componentHeight <= Math.max(6, lineHeight * 0.42) && componentWidth <= Math.max(5, width * 0.005);
+    };
+    const isTall = (component: Component) => component.maxY - component.minY + 1 >= lineHeight * 0.5;
+
+    const isKnowledgeHeading = components.length >= 5
+      && isTall(components[0]) && isSmallDot(components[1])
+      && isTall(components[2]) && isSmallDot(components[3])
+      && isTall(components[4])
+      && components[1].minX - components[0].maxX >= 2
+      && components[2].minX - components[1].maxX >= 2
+      && components[3].minX - components[2].maxX >= 2
+      && components[4].minX - components[3].maxX >= 2;
+    const minimumTextGap = Math.max(6, Math.round(width * 0.006));
+    const firstDotIndex = components.findIndex(isSmallDot);
+    const dot = components[firstDotIndex];
+    const nextAfterDot = components[firstDotIndex + 1];
+    const hasQuestionDot = firstDotIndex > 0
+      && components.slice(0, firstDotIndex).every(isTall)
+      && Boolean(nextAfterDot)
+      && nextAfterDot.minX - dot.maxX - 1 >= minimumTextGap;
+    // A printed full stop can shrink to a single antialiased pixel. In that
+    // case, the large gap between the leading digit and the stem is the more
+    // reliable signal.
+    const nextAfterLeadingDigit = components[1];
+    const hasFaintQuestionDot = components.length > 1
+      && isTall(components[0])
+      && nextAfterLeadingDigit.minX - components[0].maxX - 1 >= Math.max(9, Math.round(width * 0.01));
+    const isQuestionStart = hasQuestionDot || hasFaintQuestionDot;
+
+    if (isKnowledgeHeading && !isQuestionStart) pendingKnowledgeHeading = start;
+    if (isQuestionStart) {
+      const regionStart = pendingKnowledgeHeading !== null ? pendingKnowledgeHeading : start;
+      const minimumQuestionGap = Math.max(lineHeight * 1.5, height * 0.045);
+      if (!starts.length || regionStart - starts[starts.length - 1] > minimumQuestionGap) starts.push(regionStart);
+      pendingKnowledgeHeading = null;
+    }
+  });
+
+  const padding = Math.max(8, Math.round(height * 0.008));
+  return starts.map((start, index) => {
+    const nextStart = starts[index + 1] ?? Math.min(yScanEnd, lastContentEnd + padding * 2);
+    const top = Math.max(yScanStart, start - padding);
+    const bottom = Math.max(top + 30, nextStart - Math.floor(padding / 2));
+    return {
+      index,
+      x: Math.floor(width * 0.065),
+      y: top,
+      width: Math.floor(width * 0.88),
+      height: Math.min(yScanEnd, bottom) - top,
+    };
+  }).filter((region) => region.height >= 30);
+}
+
 function MistakeImage({ image, alt }: { image: Blob; alt: string }) {
   const [url, setUrl] = useState('');
   useEffect(() => {
@@ -222,6 +389,8 @@ export default function Home() {
   const [readerMessage, setReaderMessage] = useState('先选择练习册文件夹');
   const [selection, setSelection] = useState<Rect | null>(null);
   const [draftSelection, setDraftSelection] = useState<Rect | null>(null);
+  const [questionRegions, setQuestionRegions] = useState<QuestionRegion[]>([]);
+  const [addingQuestionIndex, setAddingQuestionIndex] = useState<number | null>(null);
   const [questionNo, setQuestionNo] = useState('');
   const [reason, setReason] = useState('');
   const [note, setNote] = useState('');
@@ -375,6 +544,7 @@ export default function Home() {
     setReaderMessage('正在显示第 ' + pageNumber + ' 页…');
     setSelection(null);
     setDraftSelection(null);
+    setQuestionRegions([]);
     pdfDocument.getPage(pageNumber).then(async (page: any) => {
       if (token !== renderToken.current) return;
       const viewport = page.getViewport({ scale: 1.45 * zoom });
@@ -385,7 +555,10 @@ export default function Home() {
       canvas.width = Math.floor(viewport.width);
       canvas.height = Math.floor(viewport.height);
       await page.render({ canvasContext: context, viewport }).promise;
-      if (token === renderToken.current) setReaderMessage('');
+      if (token === renderToken.current) {
+        setQuestionRegions(detectQuestionRegions(canvas));
+        setReaderMessage('');
+      }
     }).catch(() => setReaderMessage('这一页暂时无法显示'));
   }, [pageNumber, pdfDocument, zoom]);
 
@@ -565,38 +738,71 @@ export default function Home() {
     }
   }
 
+  async function saveCanvasRegion(
+    source: Rect,
+    details: { id?: string; questionNo: string; reason: string; note: string },
+  ) {
+    const canvas = canvasRef.current;
+    if (!canvas || !selectedEntry) return false;
+    const crop = document.createElement('canvas');
+    crop.width = Math.max(1, Math.round(source.width));
+    crop.height = Math.max(1, Math.round(source.height));
+    const context = crop.getContext('2d');
+    if (!context) return false;
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, crop.width, crop.height);
+    context.drawImage(
+      canvas,
+      Math.round(source.x), Math.round(source.y), crop.width, crop.height,
+      0, 0, crop.width, crop.height,
+    );
+    const image = await new Promise<Blob | null>((resolve) => crop.toBlob(resolve, 'image/png'));
+    if (!image) return false;
+    const mistake: Mistake = {
+      id: details.id || crypto.randomUUID(), createdAt: new Date().toISOString(),
+      subject: selectedEntry.subject, subjectCode: selectedEntry.subjectCode,
+      chapter: selectedEntry.chapter, section: selectedEntry.section, version: selectedEntry.version,
+      pdfName: selectedEntry.name, pdfPath: selectedEntry.path, page: pageNumber,
+      questionNo: details.questionNo, reason: details.reason || '未填写', note: details.note, mastered: false, image,
+    };
+    await putMistake(mistake);
+    await refreshMistakes();
+    return true;
+  }
+
   async function addMistake() {
     const canvas = canvasRef.current;
     if (!canvas || !selection || !selectedEntry) return;
     const bounds = canvas.getBoundingClientRect();
     const ratioX = canvas.width / bounds.width;
     const ratioY = canvas.height / bounds.height;
-    const crop = document.createElement('canvas');
-    crop.width = Math.max(1, Math.round(selection.width * ratioX));
-    crop.height = Math.max(1, Math.round(selection.height * ratioY));
-    const context = crop.getContext('2d');
-    if (!context) return;
-    context.fillStyle = '#fff';
-    context.fillRect(0, 0, crop.width, crop.height);
-    context.drawImage(
-      canvas,
-      Math.round(selection.x * ratioX), Math.round(selection.y * ratioY), crop.width, crop.height,
-      0, 0, crop.width, crop.height,
-    );
-    const image = await new Promise<Blob | null>((resolve) => crop.toBlob(resolve, 'image/png'));
-    if (!image) return;
-    const mistake: Mistake = {
-      id: crypto.randomUUID(), createdAt: new Date().toISOString(),
-      subject: selectedEntry.subject, subjectCode: selectedEntry.subjectCode,
-      chapter: selectedEntry.chapter, section: selectedEntry.section, version: selectedEntry.version,
-      pdfName: selectedEntry.name, pdfPath: selectedEntry.path, page: pageNumber,
-      questionNo: questionNo.trim(), reason: reason || '未填写', note: note.trim(), mastered: false, image,
-    };
-    await putMistake(mistake);
-    await refreshMistakes();
+    const saved = await saveCanvasRegion({
+      x: selection.x * ratioX,
+      y: selection.y * ratioY,
+      width: selection.width * ratioX,
+      height: selection.height * ratioY,
+    }, { questionNo: questionNo.trim(), reason, note: note.trim() });
+    if (!saved) return;
     setQuestionNo(''); setReason(''); setNote(''); setSelection(null);
     setMobilePanel(null);
     setToast('已加入错题本');
+  }
+
+  async function addDetectedQuestion(region: QuestionRegion) {
+    if (!selectedEntry) return;
+    const mistakeId = `auto:${selectedEntry.id}:${pageNumber}:${region.index}`;
+    if (mistakes.some((mistake) => mistake.id === mistakeId)) {
+      setToast('这道题已经在错题本里了');
+      return;
+    }
+    setAddingQuestionIndex(region.index);
+    try {
+      const label = `第 ${pageNumber} 页 · 本页第 ${region.index + 1} 题`;
+      const saved = await saveCanvasRegion(region, { id: mistakeId, questionNo: label, reason: '未填写', note: '' });
+      if (saved) setToast(`${label}已加入错题本`);
+    } finally {
+      setAddingQuestionIndex(null);
+    }
   }
 
   async function toggleMastered(mistake: Mistake) {
@@ -684,7 +890,7 @@ export default function Home() {
       <header className="topbar">
         <button className="brand" onClick={() => { setMobilePanel(null); setView('reader'); }} aria-label="返回练习册">
           <span className="brand-mark">错</span>
-          <span><b>408 错题收集器</b><small>框选题目，一键加入错题本</small></span>
+          <span><b>408 错题收集器</b><small>每题一点，自动加入错题本</small></span>
         </button>
         <div className="top-actions">
           <span className="privacy-pill"><i />错题本地保存 · PDF 私有读取</span>
@@ -715,12 +921,12 @@ export default function Home() {
                 {chapterGroups.map(([chapter, files], index) => <details key={chapter} open={index === 0 || files.some((file) => file.id === selectedEntry?.id)}><summary>{chapter}<small>{new Set(files.map((file) => file.section)).size}</small></summary><div>{files.map((file) => <button key={file.id} className={file.id === selectedEntry?.id ? 'pdf-link active' : 'pdf-link'} onClick={() => openPdfEntry(file)}><span>{file.section}</span><em>{file.version.replace('版', '')}</em></button>)}</div></details>)}
               </div>
             </>}
-            <div className="quick-card"><span>待复习</span><strong>{pendingCount ? `${pendingCount} 道还没掌握` : '还没有待复习错题'}</strong><p>{pendingCount ? '打开“我的错题”即可逐题复习。' : '框选第一道错题，复习列表会自动建立。'}</p></div>
+            <div className="quick-card"><span>待复习</span><strong>{pendingCount ? `${pendingCount} 道还没掌握` : '还没有待复习错题'}</strong><p>{pendingCount ? '打开“我的错题”即可逐题复习。' : '点击题目右侧的“＋错题”，复习列表会自动建立。'}</p></div>
           </aside>
 
           <section className="reader-panel">
             <div className="reader-toolbar">
-              <div><span className="crumb">{selectedEntry ? `${selectedEntry.subject} / ${selectedEntry.chapter}` : '等待连接练习册'}</span><strong>{selectedEntry ? `${selectedEntry.section} · ${selectedEntry.version}` : '请连接私有仓库或选择本地 PDF'}</strong></div>
+              <div><span className="crumb">{selectedEntry ? `${selectedEntry.subject} / ${selectedEntry.chapter}` : '等待连接练习册'}</span><strong>{selectedEntry ? `${selectedEntry.section} · ${selectedEntry.version}` : '请连接私有仓库或选择本地 PDF'}</strong>{selectedEntry && !readerMessage && <small className={questionRegions.length ? 'question-detection ready' : 'question-detection'}>{questionRegions.length ? `已识别本页 ${questionRegions.length} 道题，点题目右侧“＋错题”即可` : '本页未识别出题号，可继续拖动框选'}</small>}</div>
               <div className="page-controls">
                 <button disabled={pageNumber <= 1} onClick={() => setPageNumber((page) => Math.max(1, page - 1))} aria-label="上一页">‹</button>
                 <span>第 <b>{pageNumber}</b> / {pageCount || '—'} 页</span>
@@ -729,7 +935,15 @@ export default function Home() {
               </div>
             </div>
             <div className="document-stage">
-              {!selectedEntry ? <div className="connect-empty"><div className="empty-icon"><span /></div><h2>连接你的分节练习册</h2><p>换电脑也能用：直接读取你的 GitHub 私有 PDF 仓库</p><div className="connect-actions"><button onClick={openGitHubDialog}>连接私有 PDF 仓库</button><button className="secondary" onClick={connectFolder}>选择本地文件夹</button><button className="secondary" onClick={() => pdfInputRef.current?.click()}>选择 PDF 文件</button></div><small>访问令牌只保留在当前浏览器标签页；错题仍保存在本机</small></div> : <div className="canvas-wrap" ref={canvasBoxRef} onPointerDown={beginSelection} onPointerMove={moveSelection} onPointerUp={endSelection} onPointerCancel={endSelection}><canvas ref={canvasRef} />{activeRect && <div className={`selection-box ${selection ? 'done' : ''}`} style={{ left: activeRect.x, top: activeRect.y, width: activeRect.width, height: activeRect.height }}><span>{selection ? '已框选' : '松开完成'}</span></div>}{readerMessage && <div className="reader-message"><i />{readerMessage}</div>}</div>}
+              {!selectedEntry ? <div className="connect-empty"><div className="empty-icon"><span /></div><h2>连接你的分节练习册</h2><p>换电脑也能用：直接读取你的 GitHub 私有 PDF 仓库</p><div className="connect-actions"><button onClick={openGitHubDialog}>连接私有 PDF 仓库</button><button className="secondary" onClick={connectFolder}>选择本地文件夹</button><button className="secondary" onClick={() => pdfInputRef.current?.click()}>选择 PDF 文件</button></div><small>访问令牌只保留在当前浏览器标签页；错题仍保存在本机</small></div> : <div className="canvas-wrap" ref={canvasBoxRef} onPointerDown={beginSelection} onPointerMove={moveSelection} onPointerUp={endSelection} onPointerCancel={endSelection}>
+                <canvas ref={canvasRef} />
+                {questionRegions.map((region) => {
+                  const alreadyAdded = mistakes.some((mistake) => mistake.id === `auto:${selectedEntry.id}:${pageNumber}:${region.index}`);
+                  return <div className="question-region" key={`${pageNumber}:${region.index}`} style={{ left: `${region.x / (canvasRef.current?.width || 1) * 100}%`, top: `${region.y / (canvasRef.current?.height || 1) * 100}%`, width: `${region.width / (canvasRef.current?.width || 1) * 100}%`, height: `${region.height / (canvasRef.current?.height || 1) * 100}%` }}><span>本页第 {region.index + 1} 题</span><button className={alreadyAdded ? 'added' : ''} disabled={addingQuestionIndex !== null} onPointerDown={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); void addDetectedQuestion(region); }}>{addingQuestionIndex === region.index ? '添加中…' : alreadyAdded ? '✓ 已加入' : '＋ 错题'}</button></div>;
+                })}
+                {activeRect && <div className={`selection-box ${selection ? 'done' : ''}`} style={{ left: activeRect.x, top: activeRect.y, width: activeRect.width, height: activeRect.height }}><span>{selection ? '已框选' : '松开完成'}</span></div>}
+                {readerMessage && <div className="reader-message"><i />{readerMessage}</div>}
+              </div>}
             </div>
           </section>
 
@@ -754,9 +968,9 @@ export default function Home() {
       ) : (
         <section className="mistakes-view">
           <div className="mistakes-heading"><div><span>我的错题</span><h2>{mistakes.length} 道错题，{pendingCount} 道待掌握</h2></div><div className="heading-actions"><input ref={backupInputRef} className="backup-input" type="file" accept="application/json,.json" onChange={importBackup} /><button className="backup-button" onClick={() => backupInputRef.current?.click()}>导入备份</button><button className="backup-button" disabled={!mistakes.length} onClick={exportBackup}>导出备份</button><button className="print-button" disabled={!filteredMistakes.length} onClick={printMistakes}>打印 / 保存为 PDF</button></div></div>
-          <div className="filterbar"><select value={filterSubject} onChange={(event) => setFilterSubject(event.target.value)}><option>全部</option>{SUBJECTS.map((subject) => <option key={subject.code} value={subject.code}>{subject.name}</option>)}</select><select value={filterStatus} onChange={(event) => setFilterStatus(event.target.value)}><option>全部状态</option><option>待掌握</option><option>已掌握</option></select><div className="mistake-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索题号、章节、错因或笔记" /></div></div>
+          <div className="filterbar"><select value={filterSubject} onChange={(event) => setFilterSubject(event.target.value)}><option>全部</option>{SUBJECTS.map((subject) => <option key={subject.code} value={subject.code}>{subject.name}</option>)}</select><select value={filterStatus} onChange={(event) => setFilterStatus(event.target.value)}><option>全部状态</option><option>待掌握</option><option>已掌握</option></select><div className="mistake-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索章节、小节、页码或题目" /></div></div>
           <div className="sync-note"><b>换电脑使用：</b>旧电脑点击“导出备份”，在新电脑打开同一个网站后点击“导入备份”。PDF 和错题不会公开上传。</div>
-          {filteredMistakes.length ? <div className="mistake-grid">{filteredMistakes.map((mistake) => <article className={mistake.mastered ? 'mistake-card mastered' : 'mistake-card'} key={mistake.id}><div className="mistake-image"><MistakeImage image={mistake.image} alt={`${mistake.section} 第${mistake.questionNo || ''}题`} />{mistake.mastered && <span>已掌握</span>}</div><div className="mistake-body"><div className="mistake-tags"><span>{mistake.subjectCode}</span><span>{mistake.section.split(' ')[0]}</span><span>第{mistake.page}页</span></div><h3>{mistake.questionNo ? `第 ${mistake.questionNo} 题` : '未填写题号'} · {mistake.reason}</h3><p className="mistake-path">{mistake.chapter} / {mistake.section}</p>{mistake.note && <p className="mistake-note">{mistake.note}</p>}<div className="mistake-actions"><button onClick={() => toggleMastered(mistake)}>{mistake.mastered ? '标记为待复习' : '✓ 我已掌握'}</button><button className="delete-button" onClick={() => deleteMistake(mistake)}>删除</button></div></div></article>)}</div> : <div className="mistakes-empty"><div>✓</div><h3>{mistakes.length ? '没有符合条件的错题' : '错题本还是空的'}</h3><p>{mistakes.length ? '换一个筛选条件再看看。' : '返回练习册，拖动框选题目后点击“加入错题本”。'}</p><button onClick={() => setView('reader')}>返回练习册</button></div>}
+          {filteredMistakes.length ? <div className="mistake-grid">{filteredMistakes.map((mistake) => <article className={mistake.mastered ? 'mistake-card mastered' : 'mistake-card'} key={mistake.id}><div className="mistake-image"><MistakeImage image={mistake.image} alt={`${mistake.section} ${mistake.questionNo || ''}`} />{mistake.mastered && <span>已掌握</span>}</div><div className="mistake-body"><div className="mistake-tags"><span>{mistake.subjectCode}</span><span>{mistake.section.split(' ')[0]}</span><span>第{mistake.page}页</span></div><h3>{displayQuestionNo(mistake.questionNo)} · {mistake.reason}</h3><p className="mistake-path">{mistake.chapter} / {mistake.section}</p>{mistake.note && <p className="mistake-note">{mistake.note}</p>}<div className="mistake-actions"><button onClick={() => toggleMastered(mistake)}>{mistake.mastered ? '标记为待复习' : '✓ 我已掌握'}</button><button className="delete-button" onClick={() => deleteMistake(mistake)}>删除</button></div></div></article>)}</div> : <div className="mistakes-empty"><div>✓</div><h3>{mistakes.length ? '没有符合条件的错题' : '错题本还是空的'}</h3><p>{mistakes.length ? '换一个筛选条件再看看。' : '返回练习册，点击题目右侧的“＋错题”即可加入。'}</p><button onClick={() => setView('reader')}>返回练习册</button></div>}
         </section>
       )}
       {githubDialogOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !githubConnecting) setGithubDialogOpen(false); }}>
