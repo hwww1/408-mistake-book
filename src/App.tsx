@@ -238,6 +238,7 @@ export default function Home() {
   const [githubTokenDraft, setGithubTokenDraft] = useState('');
   const [githubConnecting, setGithubConnecting] = useState(false);
   const [githubError, setGithubError] = useState('');
+  const [mobilePanel, setMobilePanel] = useState<'chapters' | 'capture' | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const canvasBoxRef = useRef<HTMLDivElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -530,6 +531,7 @@ export default function Home() {
     if (next.width >= 30 && next.height >= 30) {
       setSelection(next);
       setDraftSelection(null);
+      setMobilePanel('capture');
       setToast('题目已框选，可以加入错题本');
     } else {
       setDraftSelection(null);
@@ -566,6 +568,7 @@ export default function Home() {
     await putMistake(mistake);
     await refreshMistakes();
     setQuestionNo(''); setReason(''); setNote(''); setSelection(null);
+    setMobilePanel(null);
     setToast('已加入错题本');
   }
 
@@ -652,13 +655,13 @@ export default function Home() {
       <input ref={folderInputRef} className="file-input" type="file" accept="application/pdf,.pdf" multiple onChange={(event) => { connectPdfFiles(event.target.files, true); event.target.value = ''; }} />
       <input ref={pdfInputRef} className="file-input" type="file" accept="application/pdf,.pdf" multiple onChange={(event) => { connectPdfFiles(event.target.files, false); event.target.value = ''; }} />
       <header className="topbar">
-        <button className="brand" onClick={() => setView('reader')} aria-label="返回练习册">
+        <button className="brand" onClick={() => { setMobilePanel(null); setView('reader'); }} aria-label="返回练习册">
           <span className="brand-mark">错</span>
           <span><b>408 错题收集器</b><small>框选题目，一键加入错题本</small></span>
         </button>
         <div className="top-actions">
           <span className="privacy-pill"><i />错题本地保存 · PDF 私有读取</span>
-          <button className={view === 'mistakes' ? 'ghost-button active' : 'ghost-button'} onClick={() => setView(view === 'reader' ? 'mistakes' : 'reader')}>
+          <button className={view === 'mistakes' ? 'ghost-button active' : 'ghost-button'} onClick={() => { setMobilePanel(null); setView(view === 'reader' ? 'mistakes' : 'reader'); }}>
             {view === 'reader' ? '我的错题' : '返回练习册'} <b>{mistakes.length}</b>
           </button>
         </div>
@@ -666,7 +669,8 @@ export default function Home() {
 
       {view === 'reader' ? (
         <div className="workspace">
-          <aside className="sidebar">
+          <aside className={`sidebar ${mobilePanel === 'chapters' ? 'mobile-open' : ''}`}>
+            <button className="drawer-close" onClick={() => setMobilePanel(null)} aria-label="关闭章节目录">×</button>
             <button className="folder-button" onClick={entries.length ? connectFolder : openGitHubDialog}>
               <span className="folder-icon" />
               <span><b>{connectedName ? '练习册已连接' : '连接私有 PDF 仓库'}</b>{connectedName && <small>{connectedName}</small>}</span>
@@ -681,7 +685,7 @@ export default function Home() {
             {entries.length > 0 && <>
               <div className="chapter-search"><span>⌕</span><input value={sidebarSearch} onChange={(event) => setSidebarSearch(event.target.value)} placeholder="搜索章节或小节" /></div>
               <div className="chapter-tree">
-                {chapterGroups.map(([chapter, files], index) => <details key={chapter} open={index === 0 || files.some((file) => file.id === selectedEntry?.id)}><summary>{chapter}<small>{new Set(files.map((file) => file.section)).size}</small></summary><div>{files.map((file) => <button key={file.id} className={file.id === selectedEntry?.id ? 'pdf-link active' : 'pdf-link'} onClick={() => setSelectedEntry(file)}><span>{file.section}</span><em>{file.version.replace('版', '')}</em></button>)}</div></details>)}
+                {chapterGroups.map(([chapter, files], index) => <details key={chapter} open={index === 0 || files.some((file) => file.id === selectedEntry?.id)}><summary>{chapter}<small>{new Set(files.map((file) => file.section)).size}</small></summary><div>{files.map((file) => <button key={file.id} className={file.id === selectedEntry?.id ? 'pdf-link active' : 'pdf-link'} onClick={() => { setSelectedEntry(file); setMobilePanel(null); }}><span>{file.section}</span><em>{file.version.replace('版', '')}</em></button>)}</div></details>)}
               </div>
             </>}
             <div className="quick-card"><span>待复习</span><strong>{pendingCount ? `${pendingCount} 道还没掌握` : '还没有待复习错题'}</strong><p>{pendingCount ? '打开“我的错题”即可逐题复习。' : '框选第一道错题，复习列表会自动建立。'}</p></div>
@@ -702,7 +706,14 @@ export default function Home() {
             </div>
           </section>
 
-          <aside className="capture-panel">
+          <div className="mobile-dock" aria-label="练习册工具">
+            <button className="mobile-chapters-button" onClick={() => setMobilePanel('chapters')}>☰ 章节目录</button>
+            <button onClick={() => setMobilePanel('capture')} disabled={!selectedEntry}>＋ 加入错题</button>
+          </div>
+          {mobilePanel && <button className="mobile-drawer-backdrop" onClick={() => setMobilePanel(null)} aria-label="关闭面板" />}
+
+          <aside className={`capture-panel ${mobilePanel === 'capture' ? 'mobile-open' : ''}`}>
+            <button className="drawer-close" onClick={() => setMobilePanel(null)} aria-label="关闭错题面板">×</button>
             <div className="capture-head"><span className={selection ? 'capture-icon ready' : 'capture-icon'}>{selection ? '✓' : '＋'}</span><div><strong>加入错题本</strong><small>{selection ? '题目已框选，补充信息后保存' : '在中间 PDF 上拖动框选题目'}</small></div></div>
             {selection && <div className="selection-ready">已截取 {Math.round(selection.width)} × {Math.round(selection.height)} 区域 <button onClick={() => setSelection(null)}>重选</button></div>}
             <label>题号 <span>选填</span><input value={questionNo} onChange={(event) => setQuestionNo(event.target.value)} placeholder="例如：12" /></label>
