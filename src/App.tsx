@@ -60,6 +60,7 @@ const GITHUB_OWNER = 'hwww1';
 const GITHUB_REPO = '408-pdf-library';
 const GITHUB_BRANCH = 'main';
 const GITHUB_TOKEN_KEY = '408-private-repo-token';
+const SELECTED_PDF_KEY = '408-selected-pdf';
 const GITHUB_TOKEN_URL = 'https://github.com/settings/personal-access-tokens/new?name=408%20PDF%20Library&description=Read-only%20access%20for%20408%20mistake%20book&target_name=hwww1&expires_in=45&contents=read';
 
 function parsePdf(parts: string[], handle: LocalFileHandle): PdfEntry {
@@ -251,7 +252,10 @@ export default function Home() {
   const activateFiles = useCallback((files: PdfEntry[], label: string) => {
     setEntries(files);
     setConnectedName(label);
-    const first = files.find((file) => file.subjectCode === activeSubject && file.version === '做题版') || files[0];
+    const savedPdfId = window.sessionStorage.getItem(SELECTED_PDF_KEY);
+    const first = files.find((file) => file.id === savedPdfId)
+      || files.find((file) => file.subjectCode === activeSubject && file.version === '做题版')
+      || files[0];
     if (first) {
       setActiveSubject(first.subjectCode);
       setSelectedEntry(first);
@@ -495,7 +499,18 @@ export default function Home() {
   function chooseSubject(code: string) {
     setActiveSubject(code);
     const first = entries.find((entry) => entry.subjectCode === code && entry.version === '做题版') || entries.find((entry) => entry.subjectCode === code);
-    if (first) setSelectedEntry(first);
+    if (first) openPdfEntry(first);
+  }
+
+  function openPdfEntry(file: PdfEntry) {
+    setMobilePanel(null);
+    if (file.id === selectedEntry?.id) return;
+    if (file.id.startsWith('github:')) {
+      window.sessionStorage.setItem(SELECTED_PDF_KEY, file.id);
+      window.location.reload();
+      return;
+    }
+    setSelectedEntry(file);
   }
 
   function pointInCanvas(event: ReactPointerEvent<HTMLDivElement>) {
@@ -697,7 +712,7 @@ export default function Home() {
             {entries.length > 0 && <>
               <div className="chapter-search"><span>⌕</span><input value={sidebarSearch} onChange={(event) => setSidebarSearch(event.target.value)} placeholder="搜索章节或小节" /></div>
               <div className="chapter-tree">
-                {chapterGroups.map(([chapter, files], index) => <details key={chapter} open={index === 0 || files.some((file) => file.id === selectedEntry?.id)}><summary>{chapter}<small>{new Set(files.map((file) => file.section)).size}</small></summary><div>{files.map((file) => <button key={file.id} className={file.id === selectedEntry?.id ? 'pdf-link active' : 'pdf-link'} onClick={() => { setSelectedEntry(file); setMobilePanel(null); }}><span>{file.section}</span><em>{file.version.replace('版', '')}</em></button>)}</div></details>)}
+                {chapterGroups.map(([chapter, files], index) => <details key={chapter} open={index === 0 || files.some((file) => file.id === selectedEntry?.id)}><summary>{chapter}<small>{new Set(files.map((file) => file.section)).size}</small></summary><div>{files.map((file) => <button key={file.id} className={file.id === selectedEntry?.id ? 'pdf-link active' : 'pdf-link'} onClick={() => openPdfEntry(file)}><span>{file.section}</span><em>{file.version.replace('版', '')}</em></button>)}</div></details>)}
               </div>
             </>}
             <div className="quick-card"><span>待复习</span><strong>{pendingCount ? `${pendingCount} 道还没掌握` : '还没有待复习错题'}</strong><p>{pendingCount ? '打开“我的错题”即可逐题复习。' : '框选第一道错题，复习列表会自动建立。'}</p></div>
