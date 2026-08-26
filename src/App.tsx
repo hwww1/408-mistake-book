@@ -699,7 +699,7 @@ export default function Home() {
       const pdfjs = await import('pdfjs-dist/build/pdf.mjs');
       pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
       let lastError: unknown = null;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
         try {
           const file = await selectedEntry.handle.getFile(controller.signal);
           if (cancelled) return;
@@ -721,8 +721,10 @@ export default function Home() {
           if (loadingTask) await loadingTask.destroy().catch(() => undefined);
           loadingTask = null;
           selectedEntry.handle.clearCache?.();
-          if (cancelled || timedOut || attempt === 2) break;
-          await new Promise((resolve) => window.setTimeout(resolve, attempt === 0 ? 10_000 : 25_000));
+          if (cancelled || timedOut || attempt === 3) break;
+          setReaderMessage('GitHub 大文件连接暂时繁忙，正在后台自动恢复…');
+          const retryDelay = [10_000, 25_000, 40_000][attempt];
+          await new Promise((resolve) => window.setTimeout(resolve, retryDelay));
         }
       }
       throw lastError;
