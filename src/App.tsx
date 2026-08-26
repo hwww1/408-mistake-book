@@ -671,7 +671,7 @@ export default function Home() {
     if (!selectedEntry) return;
     let cancelled = false;
     let loadingTask: any = null;
-    const controller = new AbortController();
+    let activeController: AbortController | null = null;
     let timedOut = false;
     let timeout = 0;
     renderToken.current += 1;
@@ -701,7 +701,9 @@ export default function Home() {
       let lastError: unknown = null;
       for (let attempt = 0; attempt < 4; attempt += 1) {
         try {
-          const file = await selectedEntry.handle.getFile(controller.signal);
+          activeController?.abort('retry-replaced');
+          activeController = new AbortController();
+          const file = await selectedEntry.handle.getFile(activeController.signal);
           if (cancelled) return;
           loadingTask = pdfjs.getDocument({ data: await file.arrayBuffer() });
           const document = await loadingTask.promise;
@@ -732,7 +734,7 @@ export default function Home() {
 
     timeout = window.setTimeout(() => {
       timedOut = true;
-      controller.abort('timeout');
+      activeController?.abort('timeout');
       if (loadingTask) loadingTask.destroy().catch(() => undefined);
     }, 120_000);
     loadDocument().catch((error) => {
@@ -748,7 +750,7 @@ export default function Home() {
     return () => {
       cancelled = true;
       window.clearTimeout(timeout);
-      controller.abort('chapter-changed');
+      activeController?.abort('chapter-changed');
       if (loadingTask) loadingTask.destroy().catch(() => undefined);
     };
   }, [loadAttempt, selectedEntry]);
