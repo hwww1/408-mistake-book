@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["analysis", "noteToAppend", "suggestedReason"],
+  "properties": {
+    "analysis": { "type": "string" },
+    "noteToAppend": { "type": "string" },
+    "suggestedReason": {
+      "type": "string",
+      "enum": ["概念不清", "计算错误", "审题失误", "知识遗忘", "方法不熟", "其他"]
+    }
+  }
+}

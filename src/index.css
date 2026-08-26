@@ -218,6 +218,7 @@ button:disabled { cursor: not-allowed; }
 .codex-help { margin-top: 14px; border: 1px solid #c5dacf; border-radius: 10px; background: #eef7f2; padding: 11px 12px; color: #506e60; font-size: 10px; line-height: 1.55; }
 .codex-help b, .codex-help span { display: block; }
 .codex-help b { margin-bottom: 3px; color: var(--green); font-size: 11px; }
+.codex-help span { max-height: 190px; overflow: auto; white-space: pre-wrap; }
 .detail-actions { flex-wrap: wrap; }
 .mistakes-empty { max-width: 620px; margin: 70px auto; padding: 55px 25px; border: 1px solid var(--line); border-radius: 17px; background: #fff; text-align: center; }
 .mistakes-empty > div { width: 55px; height: 55px; display: grid; place-items: center; margin: 0 auto 15px; border-radius: 50%; background: var(--green-soft); color: var(--green); font-size: 22px; font-weight: 900; }
@@ -280,5 +281,4 @@ button:disabled { cursor: not-allowed; }
   .dialog-actions { flex-direction: column-reverse; }
   .dialog-actions button { width: 100%; }
 }
-
 
