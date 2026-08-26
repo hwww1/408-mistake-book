@@ -13,6 +13,7 @@ type LocalFileHandle = {
   kind: 'file';
   name: string;
   getFile: (signal?: AbortSignal) => Promise<File>;
+  clearCache?: () => void;
 };
 
 type LocalDirectoryHandle = {
@@ -155,6 +156,7 @@ function parseGitHubPdf(item: GitHubContentItem, token: string): PdfEntry {
   const handle: LocalFileHandle = {
     kind: 'file',
     name: item.name,
+    clearCache: () => { cachedFile = null; },
     getFile: async (signal) => {
       if (cachedFile) return cachedFile;
       cachedFile = (async () => {
@@ -164,6 +166,7 @@ function parseGitHubPdf(item: GitHubContentItem, token: string): PdfEntry {
         );
         if (!response.ok) throw new Error(`GitHub PDF request failed: ${response.status}`);
         const blob = await response.blob();
+        if (item.size && blob.size !== item.size) throw new Error(`GitHub PDF incomplete: ${blob.size}/${item.size}`);
         return new File([blob], item.name, { type: 'application/pdf' });
       })();
       try {
@@ -702,8 +705,9 @@ export default function Home() {
           lastError = error;
           if (loadingTask) await loadingTask.destroy().catch(() => undefined);
           loadingTask = null;
+          selectedEntry.handle.clearCache?.();
           if (cancelled || timedOut || attempt === 2) break;
-          await new Promise((resolve) => window.setTimeout(resolve, 600 * (attempt + 1)));
+          await new Promise((resolve) => window.setTimeout(resolve, attempt === 0 ? 2_000 : 5_000));
         }
       }
       throw lastError;
