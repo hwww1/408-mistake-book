@@ -12,8 +12,7 @@ import {
 type LocalFileHandle = {
   kind: 'file';
   name: string;
-  getFile: () => Promise<File>;
-  getPdfSource?: () => { url: string; httpHeaders: Record<string, string> };
+  getFile: (signal?: AbortSignal) => Promise<File>;
 };
 
 type LocalDirectoryHandle = {
@@ -48,6 +47,19 @@ type PdfEntry = {
 type Rect = { x: number; y: number; width: number; height: number };
 type QuestionRegion = Rect & { index: number };
 type View = 'reader' | 'mistakes';
+type SiteTool = {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  annotations?: Record<string, boolean>;
+  execute: (input: Record<string, unknown>) => unknown | Promise<unknown>;
+};
+type MistakeBookBridge = {
+  getCurrent: () => Record<string, unknown>;
+  list: (query: string) => Record<string, unknown>;
+  open: (id: string) => Record<string, unknown>;
+  update: (input: Record<string, unknown>) => Promise<Record<string, unknown>>;
+};
 
 const SUBJECTS = [
   { code: 'DS', name: '数据结构', tone: 'green' },
@@ -139,21 +151,27 @@ function githubHeaders(token: string, raw = false): Record<string, string> {
 
 function parseGitHubPdf(item: GitHubContentItem, token: string): PdfEntry {
   const encodedPath = item.path.split('/').map(encodeURIComponent).join('/');
+  let cachedFile: Promise<File> | null = null;
   const handle: LocalFileHandle = {
     kind: 'file',
     name: item.name,
-    getPdfSource: () => ({
-      url: `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${encodedPath}?ref=${GITHUB_BRANCH}`,
-      httpHeaders: githubHeaders(token, true),
-    }),
-    getFile: async () => {
-      const response = await fetch(
-        `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${encodedPath}?ref=${GITHUB_BRANCH}`,
-        { headers: githubHeaders(token, true) },
-      );
-      if (!response.ok) throw new Error(`GitHub PDF request failed: ${response.status}`);
-      const blob = await response.blob();
-      return new File([blob], item.name, { type: 'application/pdf' });
+    getFile: async (signal) => {
+      if (cachedFile) return cachedFile;
+      cachedFile = (async () => {
+        const response = await fetch(
+          `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${encodedPath}?ref=${GITHUB_BRANCH}`,
+          { headers: githubHeaders(token, true), signal },
+        );
+        if (!response.ok) throw new Error(`GitHub PDF request failed: ${response.status}`);
+        const blob = await response.blob();
+        return new File([blob], item.name, { type: 'application/pdf' });
+      })();
+      try {
+        return await cachedFile;
+      } catch (error) {
+        cachedFile = null;
+        throw error;
+      }
     },
   };
   return parseFlatPdf(item.name, item.path, handle, `github:${item.sha}`);
@@ -387,6 +405,8 @@ export default function Home() {
   const [pageCount, setPageCount] = useState(0);
   const [zoom, setZoom] = useState(1);
   const [readerMessage, setReaderMessage] = useState('先选择练习册文件夹');
+  const [readerError, setReaderError] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [selection, setSelection] = useState<Rect | null>(null);
   const [draftSelection, setDraftSelection] = useState<Rect | null>(null);
   const [questionRegions, setQuestionRegions] = useState<QuestionRegion[]>([]);
@@ -402,6 +422,8 @@ export default function Home() {
   const [detailReason, setDetailReason] = useState('');
   const [detailNote, setDetailNote] = useState('');
   const [detailSaving, setDetailSaving] = useState(false);
+  const [codexReadyId, setCodexReadyId] = useState('');
+  const [siteToolsSupported, setSiteToolsSupported] = useState(false);
   const [toast, setToast] = useState('');
   const [filterSubject, setFilterSubject] = useState('全部');
   const [filterStatus, setFilterStatus] = useState('待掌握');
@@ -420,6 +442,9 @@ export default function Home() {
   const dragStart = useRef<{ x: number; y: number } | null>(null);
   const renderToken = useRef(0);
   const pdfDocumentRef = useRef<any>(null);
+  const mistakesRef = useRef<Mistake[]>([]);
+  const detailMistakeRef = useRef<Mistake | null>(null);
+  const detailDraftRef = useRef({ reason: '', note: '' });
 
   const refreshMistakes = useCallback(async () => {
     setMistakes(await listMistakes());
@@ -468,6 +493,158 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    mistakesRef.current = mistakes;
+    detailMistakeRef.current = detailMistake;
+    detailDraftRef.current = { reason: detailReason, note: detailNote };
+    const siteWindow = window as Window & { __mistakeBookBridge?: MistakeBookBridge };
+    const summarize = (mistake: Mistake) => ({
+      id: mistake.id,
+      subject: mistake.subject,
+      chapter: mistake.chapter,
+      section: mistake.section,
+      page: mistake.page,
+      questionNo: displayQuestionNo(mistake.questionNo),
+      reason: mistake.reason,
+      note: mistake.note,
+      mastered: mistake.mastered,
+    });
+    const bridge: MistakeBookBridge = {
+      getCurrent: () => {
+        const current = detailMistakeRef.current;
+        if (!current) return { found: false, message: '请先在“我的错题”中打开一道题目。' };
+        return {
+          found: true,
+          ...summarize(current),
+          reason: detailDraftRef.current.reason || '未填写',
+          note: detailDraftRef.current.note,
+          imageHint: '题目图片正在网页的错题详情弹窗左侧显示，可直接查看页面。',
+        };
+      },
+      list: (query) => {
+        const normalized = query.trim().toLowerCase();
+        const rows = mistakesRef.current.filter((mistake) => !normalized || `${mistake.subject} ${mistake.chapter} ${mistake.section} ${mistake.questionNo} ${mistake.reason} ${mistake.note}`.toLowerCase().includes(normalized));
+        return { count: rows.length, mistakes: rows.slice(0, 50).map(summarize) };
+      },
+      open: (id) => {
+        const target = mistakesRef.current.find((mistake) => mistake.id === id);
+        if (!target) return { opened: false, message: '没有找到这道错题。' };
+        setView('mistakes');
+        openMistakeDetail(target);
+        return { opened: true, mistake: summarize(target), imageHint: '题目图片已在网页中放大显示。' };
+      },
+      update: async (input) => {
+        const id = typeof input.id === 'string' ? input.id : detailMistakeRef.current?.id;
+        const current = mistakesRef.current.find((mistake) => mistake.id === id);
+        if (!current) return { updated: false, message: '没有找到要更新的错题。' };
+        const reasonInput = typeof input.reason === 'string' ? input.reason : undefined;
+        const reasonValue = reasonInput && REASONS.includes(reasonInput) ? reasonInput : current.reason;
+        const addition = typeof input.noteToAppend === 'string' ? input.noteToAppend.trim() : '';
+        const nextNote = addition ? [current.note.trim(), addition].filter(Boolean).join('\n\n') : current.note;
+        const updated = {
+          ...current,
+          reason: reasonValue,
+          note: nextNote,
+          mastered: typeof input.mastered === 'boolean' ? input.mastered : current.mastered,
+        };
+        await putMistake(updated);
+        await refreshMistakes();
+        if (detailMistakeRef.current?.id === updated.id) {
+          setDetailMistake(updated);
+          setDetailReason(updated.reason === '未填写' ? '' : updated.reason);
+          setDetailNote(updated.note);
+        }
+        return { updated: true, mistake: summarize(updated) };
+      },
+    };
+    siteWindow.__mistakeBookBridge = bridge;
+    return () => {
+      if (siteWindow.__mistakeBookBridge === bridge) delete siteWindow.__mistakeBookBridge;
+    };
+  }, [detailMistake, detailNote, detailReason, mistakes, refreshMistakes]);
+
+  useEffect(() => {
+    const siteDocument = document as Document & {
+      modelContext?: { registerTool: (tool: SiteTool) => void | Promise<void> };
+    };
+    const siteWindow = window as Window & {
+      __mistakeBookBridge?: MistakeBookBridge;
+      __mistakeBookToolsRegistered?: boolean;
+    };
+    let stopped = false;
+    let timer = 0;
+    const callBridge = <T extends keyof MistakeBookBridge>(method: T, ...args: Parameters<MistakeBookBridge[T]>) => {
+      const bridge = siteWindow.__mistakeBookBridge;
+      if (!bridge) return { error: '错题本页面尚未准备好，请稍后再试。' };
+      return (bridge[method] as (...values: Parameters<MistakeBookBridge[T]>) => ReturnType<MistakeBookBridge[T]>)(...args);
+    };
+    const register = async () => {
+      if (stopped || typeof siteDocument.modelContext?.registerTool !== 'function') return false;
+      setSiteToolsSupported(true);
+      if (siteWindow.__mistakeBookToolsRegistered) return true;
+      const tools: SiteTool[] = [
+        {
+          name: 'get_current_mistake',
+          description: '读取用户当前在 408 错题本中放大打开的题目、章节、错误原因和笔记。题目图片同时显示在当前网页中。',
+          inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+          annotations: { readOnlyHint: true },
+          execute: async () => callBridge('getCurrent'),
+        },
+        {
+          name: 'list_mistakes',
+          description: '按科目、章节、题号、错因或笔记关键词检索 408 错题本。',
+          inputSchema: {
+            type: 'object',
+            properties: { query: { type: 'string', description: '可选的搜索关键词，留空返回最近的错题。' } },
+            additionalProperties: false,
+          },
+          annotations: { readOnlyHint: true },
+          execute: async (input) => callBridge('list', typeof input.query === 'string' ? input.query : ''),
+        },
+        {
+          name: 'open_mistake',
+          description: '在当前网页中打开并放大指定错题，让用户和 Codex 一起查看题目图片。',
+          inputSchema: {
+            type: 'object',
+            properties: { id: { type: 'string', description: 'list_mistakes 返回的错题 id。' } },
+            required: ['id'],
+            additionalProperties: false,
+          },
+          annotations: { readOnlyHint: true },
+          execute: async (input) => callBridge('open', String(input.id || '')),
+        },
+        {
+          name: 'update_mistake_learning',
+          description: '把 Codex 的简短分析追加进错题笔记，并可更新错误原因或掌握状态；不会删除原笔记。',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: '错题 id；省略时更新当前打开的错题。' },
+              noteToAppend: { type: 'string', description: '要追加到原笔记末尾的学习结论。' },
+              reason: { type: 'string', enum: REASONS },
+              mastered: { type: 'boolean' },
+            },
+            additionalProperties: false,
+          },
+          annotations: { readOnlyHint: false, destructiveHint: false },
+          execute: async (input) => callBridge('update', input),
+        },
+      ];
+      for (const tool of tools) await siteDocument.modelContext.registerTool(tool);
+      siteWindow.__mistakeBookToolsRegistered = true;
+      return true;
+    };
+    const waitForSupport = async () => {
+      if (await register()) return;
+      timer = window.setTimeout(waitForSupport, 600);
+    };
+    void waitForSupport();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(''), 2600);
     return () => window.clearTimeout(timer);
@@ -485,6 +662,7 @@ export default function Home() {
     setDraftSelection(null);
     setPageNumber(1);
     setPageCount(0);
+    setReaderError(false);
     setReaderMessage('正在打开 PDF…');
 
     setPdfDocument(null);
@@ -502,20 +680,14 @@ export default function Home() {
 
       const pdfjs = await import('pdfjs-dist/build/pdf.mjs');
       pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
-      const remoteSource = selectedEntry.handle.getPdfSource?.();
-      if (remoteSource) {
-        loadingTask = pdfjs.getDocument({ ...remoteSource, rangeChunkSize: 256 * 1024 });
-      } else {
-        const file = await selectedEntry.handle.getFile();
-        if (cancelled) return;
-        loadingTask = pdfjs.getDocument({ data: await file.arrayBuffer() });
-      }
-
       timeout = window.setTimeout(() => {
         timedOut = true;
         controller.abort('timeout');
         if (loadingTask) loadingTask.destroy().catch(() => undefined);
-      }, 45_000);
+      }, 120_000);
+      const file = await selectedEntry.handle.getFile(controller.signal);
+      if (cancelled) return;
+      loadingTask = pdfjs.getDocument({ data: await file.arrayBuffer() });
       const document = await loadingTask.promise;
       loadingTask = null;
       if (cancelled) {
@@ -530,10 +702,11 @@ export default function Home() {
 
     loadDocument().catch((error) => {
       if (cancelled) return;
+      setReaderError(true);
       if (timedOut) {
-        setReaderMessage('下载超过 45 秒，已停止。请检查网络后再点一次该章节');
+        setReaderMessage('下载超过 2 分钟，已停止。请检查网络后重新打开');
       } else {
-        setReaderMessage(`这个 PDF 没有成功打开${error instanceof Error && error.message.includes('401') ? '，请重新连接私有仓库' : '，请再点一次该章节'}`);
+        setReaderMessage(`这个 PDF 没有成功打开${error instanceof Error && error.message.includes('401') ? '，请重新连接私有仓库' : '，请重新打开'}`);
       }
     }).finally(() => window.clearTimeout(timeout));
 
@@ -543,7 +716,15 @@ export default function Home() {
       controller.abort('chapter-changed');
       if (loadingTask) loadingTask.destroy().catch(() => undefined);
     };
-  }, [selectedEntry]);
+  }, [loadAttempt, selectedEntry]);
+
+  useEffect(() => {
+    const restoreOnReturn = () => {
+      if (!document.hidden && selectedEntry && readerError) setLoadAttempt((value) => value + 1);
+    };
+    document.addEventListener('visibilitychange', restoreOnReturn);
+    return () => document.removeEventListener('visibilitychange', restoreOnReturn);
+  }, [readerError, selectedEntry]);
 
   useEffect(() => {
     if (!pdfDocument || !canvasRef.current) return;
@@ -684,10 +865,9 @@ export default function Home() {
 
   function openPdfEntry(file: PdfEntry) {
     setMobilePanel(null);
-    if (file.id === selectedEntry?.id) return;
-    if (file.id.startsWith('github:')) {
-      window.sessionStorage.setItem(SELECTED_PDF_KEY, file.id);
-      window.location.reload();
+    window.sessionStorage.setItem(SELECTED_PDF_KEY, file.id);
+    if (file.id === selectedEntry?.id) {
+      if (readerError) setLoadAttempt((value) => value + 1);
       return;
     }
     setSelectedEntry(file);
@@ -836,6 +1016,19 @@ export default function Home() {
     setDetailMistake(mistake);
     setDetailReason(mistake.reason === '未填写' ? '' : mistake.reason);
     setDetailNote(mistake.note || '');
+    setCodexReadyId('');
+  }
+
+  async function prepareCodexQuestion() {
+    if (!detailMistake) return;
+    const prompt = '请分析我在 408 错题收集器中当前打开的错题。先调用 get_current_mistake 读取章节、错误原因和笔记，再查看网页左侧的题目图片，告诉我：①考点；②正确思路；③我为什么容易错；④下次遇到同类题的检查步骤。最后把简短结论追加到这道题的笔记中。';
+    setCodexReadyId(detailMistake.id);
+    try {
+      await navigator.clipboard.writeText(prompt);
+      setToast(siteToolsSupported ? '提问已复制，回到旁边的 Codex 对话发送即可' : '提问已复制，请在 Codex 内置浏览器中打开本站');
+    } catch {
+      setToast(siteToolsSupported ? '当前错题已准备好，可以在旁边询问 Codex' : '请在 Codex 内置浏览器中打开本站');
+    }
   }
 
   async function saveMistakeDetail() {
@@ -944,7 +1137,7 @@ export default function Home() {
           <span><b>408 错题收集器</b><small>每题一点，自动加入错题本</small></span>
         </button>
         <div className="top-actions">
-          <span className="privacy-pill"><i />错题本地保存 · PDF 私有读取</span>
+          <span className="privacy-pill"><i />错题本地保存 · PDF 私有读取{siteToolsSupported ? ' · Codex 已连接' : ''}</span>
           <button className={view === 'mistakes' ? 'ghost-button active' : 'ghost-button'} onClick={() => { setMobilePanel(null); setView(view === 'reader' ? 'mistakes' : 'reader'); }}>
             {view === 'reader' ? '我的错题' : '返回练习册'} <b>{mistakes.length}</b>
           </button>
@@ -993,7 +1186,7 @@ export default function Home() {
                   return <div className="question-region" key={`${pageNumber}:${region.index}`} style={{ left: `${region.x / (canvasRef.current?.width || 1) * 100}%`, top: `${region.y / (canvasRef.current?.height || 1) * 100}%`, width: `${region.width / (canvasRef.current?.width || 1) * 100}%`, height: `${region.height / (canvasRef.current?.height || 1) * 100}%` }}><span>本页第 {region.index + 1} 题</span><button className={alreadyAdded ? 'added' : ''} disabled={addingQuestionIndex !== null} onPointerDown={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); openDetectedQuestionDialog(region); }}>{addingQuestionIndex === region.index ? '添加中…' : alreadyAdded ? '✓ 查看' : '＋ 错题'}</button></div>;
                 })}
                 {activeRect && <div className={`selection-box ${selection ? 'done' : ''}`} style={{ left: activeRect.x, top: activeRect.y, width: activeRect.width, height: activeRect.height }}><span>{selection ? '已框选' : '松开完成'}</span></div>}
-                {readerMessage && <div className="reader-message"><i />{readerMessage}</div>}
+                {readerMessage && <div className={readerError ? 'reader-message error' : 'reader-message'}><i /><span>{readerMessage}</span>{readerError && <button onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); setLoadAttempt((value) => value + 1); }}>重新打开</button>}</div>}
               </div>}
             </div>
           </section>
@@ -1045,7 +1238,8 @@ export default function Home() {
             <p>{detailMistake.subject} · {detailMistake.chapter}<br />{detailMistake.section} · 第 {detailMistake.page} 页</p>
             <label>错误原因<select value={detailReason} onChange={(event) => setDetailReason(event.target.value)}><option value="">请选择</option>{REASONS.map((item) => <option key={item}>{item}</option>)}</select></label>
             <label>我的笔记 <span>可随时修改或追加</span><textarea value={detailNote} onChange={(event) => setDetailNote(event.target.value)} placeholder="补充正确思路、易错点或复习记录…" /></label>
-            <div className="dialog-actions"><button className="dialog-cancel" onClick={() => setDetailMistake(null)} disabled={detailSaving}>关闭</button><button className="dialog-connect" onClick={() => void saveMistakeDetail()} disabled={detailSaving}>{detailSaving ? '正在保存…' : '保存修改'}</button></div>
+            {codexReadyId === detailMistake.id && <div className="codex-help"><b>{siteToolsSupported ? 'Codex 已能读取这道题' : '请在 Codex 内置浏览器中使用'}</b><span>{siteToolsSupported ? '回到旁边的对话，粘贴或直接说“帮我分析当前错题”。' : '在 Codex 内置浏览器打开本站后，Site tools 会自动连接，不需要 API。'}</span></div>}
+            <div className="dialog-actions detail-actions"><button className="dialog-cancel" onClick={() => setDetailMistake(null)} disabled={detailSaving}>关闭</button><button className="codex-button" onClick={() => void prepareCodexQuestion()} disabled={detailSaving}>✦ 问 Codex</button><button className="dialog-connect" onClick={() => void saveMistakeDetail()} disabled={detailSaving}>{detailSaving ? '正在保存…' : '保存修改'}</button></div>
           </div>
         </section>
       </div>}
