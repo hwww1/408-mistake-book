@@ -77,6 +77,8 @@ const GITHUB_BRANCH = 'main';
 const GITHUB_TOKEN_KEY = '408-private-repo-token';
 const SELECTED_PDF_KEY = '408-selected-pdf';
 const GITHUB_TOKEN_URL = 'https://github.com/settings/personal-access-tokens/new?name=408%20PDF%20Library&description=Read-only%20access%20for%20408%20mistake%20book&target_name=hwww1&expires_in=45&contents=read';
+const REMOTE_PDF_CACHE_LIMIT = 3;
+const remotePdfCache = new Map<string, Promise<File>>();
 
 function parsePdf(parts: string[], handle: LocalFileHandle): PdfEntry {
   const subjectFolder = parts[0] || '';
@@ -152,43 +154,39 @@ function githubHeaders(token: string, raw = false): Record<string, string> {
 }
 
 function parseGitHubPdf(item: GitHubContentItem, token: string): PdfEntry {
-  const encodedPath = item.path.split('/').map(encodeURIComponent).join('/');
-  let cachedFile: Promise<File> | null = null;
-  let downloadUrl = item.download_url || null;
-  const metadataUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${encodedPath}?ref=${GITHUB_BRANCH}`;
+  const blobUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/blobs/${item.sha}`;
   const handle: LocalFileHandle = {
     kind: 'file',
     name: item.name,
-    clearCache: () => { cachedFile = null; downloadUrl = null; },
+    clearCache: () => { remotePdfCache.delete(item.sha); },
     getFile: async (signal) => {
-      if (cachedFile) return cachedFile;
-      cachedFile = (async () => {
-        let lastError: unknown = null;
-        for (let attempt = 0; attempt < 2; attempt += 1) {
-          try {
-            if (!downloadUrl || attempt > 0) {
-              const metadataResponse = await fetch(metadataUrl, { headers: githubHeaders(token), signal });
-              if (!metadataResponse.ok) throw new Error(`GitHub PDF metadata failed: ${metadataResponse.status}`);
-              const metadata = await metadataResponse.json() as GitHubContentItem;
-              downloadUrl = metadata.download_url || null;
-              if (!downloadUrl) throw new Error('GitHub did not return a PDF download URL');
-            }
-            const response = await fetch(downloadUrl, { cache: 'no-store', signal });
-            if (!response.ok) throw new Error(`GitHub PDF download failed: ${response.status}`);
-            const blob = await response.blob();
-            if (item.size && blob.size !== item.size) throw new Error(`GitHub PDF incomplete: ${blob.size}/${item.size}`);
-            return new File([blob], item.name, { type: 'application/pdf' });
-          } catch (error) {
-            lastError = error;
-            downloadUrl = null;
-          }
-        }
-        throw lastError;
+      const existing = remotePdfCache.get(item.sha);
+      if (existing) {
+        remotePdfCache.delete(item.sha);
+        remotePdfCache.set(item.sha, existing);
+        return existing;
+      }
+      const pending = (async () => {
+        const response = await fetch(blobUrl, { cache: 'no-store', headers: githubHeaders(token), signal });
+        if (!response.ok) throw new Error(`GitHub PDF blob failed: ${response.status}`);
+        const payload = await response.json() as { content?: string; encoding?: string; size?: number };
+        if (payload.encoding !== 'base64' || !payload.content) throw new Error('GitHub PDF blob format is invalid');
+        const binary = atob(payload.content.replace(/\s/g, ''));
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+        if (item.size && bytes.length !== item.size) throw new Error(`GitHub PDF incomplete: ${bytes.length}/${item.size}`);
+        return new File([bytes], item.name, { type: 'application/pdf' });
       })();
+      remotePdfCache.set(item.sha, pending);
+      while (remotePdfCache.size > REMOTE_PDF_CACHE_LIMIT) {
+        const oldestKey = remotePdfCache.keys().next().value as string | undefined;
+        if (!oldestKey) break;
+        remotePdfCache.delete(oldestKey);
+      }
       try {
-        return await cachedFile;
+        return await pending;
       } catch (error) {
-        cachedFile = null;
+        if (remotePdfCache.get(item.sha) === pending) remotePdfCache.delete(item.sha);
         throw error;
       }
     },
