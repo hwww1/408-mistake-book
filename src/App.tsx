@@ -459,6 +459,7 @@ export default function Home() {
   const dragStart = useRef<{ x: number; y: number } | null>(null);
   const renderToken = useRef(0);
   const pdfDocumentRef = useRef<any>(null);
+  const autoRecoveryRef = useRef({ entryId: '', attempts: 0 });
   const mistakesRef = useRef<Mistake[]>([]);
   const detailMistakeRef = useRef<Mistake | null>(null);
   const detailDraftRef = useRef({ reason: '', note: '' });
@@ -674,6 +675,10 @@ export default function Home() {
     let activeController: AbortController | null = null;
     let timedOut = false;
     let timeout = 0;
+    let recoveryTimer = 0;
+    if (autoRecoveryRef.current.entryId !== selectedEntry.id) {
+      autoRecoveryRef.current = { entryId: selectedEntry.id, attempts: 0 };
+    }
     renderToken.current += 1;
     setSelection(null);
     setDraftSelection(null);
@@ -716,6 +721,7 @@ export default function Home() {
           setPdfDocument(document);
           setPageCount(document.numPages);
           setReaderMessage('');
+          autoRecoveryRef.current = { entryId: selectedEntry.id, attempts: 0 };
           return;
         } catch (error) {
           lastError = error;
@@ -739,6 +745,16 @@ export default function Home() {
     }, 120_000);
     loadDocument().catch((error) => {
       if (cancelled) return;
+      const recovery = autoRecoveryRef.current;
+      if (!timedOut && selectedEntry.id.startsWith('github:') && recovery.entryId === selectedEntry.id && recovery.attempts < 2) {
+        autoRecoveryRef.current = { entryId: selectedEntry.id, attempts: recovery.attempts + 1 };
+        setReaderError(false);
+        setReaderMessage('GitHub 大文件连接暂时繁忙，正在后台自动恢复…');
+        recoveryTimer = window.setTimeout(() => {
+          if (!cancelled) setLoadAttempt((value) => value + 1);
+        }, recovery.attempts === 0 ? 5_000 : 15_000);
+        return;
+      }
       setReaderError(true);
       if (timedOut) {
         setReaderMessage('下载超过 2 分钟，已停止。请检查网络后重新打开');
@@ -750,6 +766,7 @@ export default function Home() {
     return () => {
       cancelled = true;
       window.clearTimeout(timeout);
+      window.clearTimeout(recoveryTimer);
       activeController?.abort('chapter-changed');
       if (loadingTask) loadingTask.destroy().catch(() => undefined);
     };
