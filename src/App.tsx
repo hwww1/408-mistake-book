@@ -722,7 +722,7 @@ export default function Home() {
           loadingTask = null;
           selectedEntry.handle.clearCache?.();
           if (cancelled || timedOut || attempt === 2) break;
-          await new Promise((resolve) => window.setTimeout(resolve, attempt === 0 ? 2_000 : 5_000));
+          await new Promise((resolve) => window.setTimeout(resolve, attempt === 0 ? 10_000 : 25_000));
         }
       }
       throw lastError;
