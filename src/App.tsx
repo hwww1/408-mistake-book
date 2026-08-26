@@ -703,6 +703,7 @@ export default function Home() {
           return;
         } catch (error) {
           lastError = error;
+          console.warn('PDF_OPEN_FAILED', selectedEntry.name, attempt + 1, error instanceof Error ? `${error.name}: ${error.message}` : String(error));
           if (loadingTask) await loadingTask.destroy().catch(() => undefined);
           loadingTask = null;
           selectedEntry.handle.clearCache?.();
