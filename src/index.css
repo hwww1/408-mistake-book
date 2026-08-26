@@ -136,6 +136,14 @@ button:disabled { cursor: not-allowed; }
 .dialog-connect { border: 0; background: var(--green); color: #fff; }
 .dialog-actions button:disabled { cursor: wait; opacity: .55; }
 .github-dialog > small { display: block; margin-top: 13px; color: #8d9992; font-size: 9px; line-height: 1.6; text-align: center; }
+.question-add-dialog { position: relative; width: min(520px, 100%); max-height: calc(100vh - 44px); overflow: auto; border-radius: 19px; background: #fff; padding: 30px; box-shadow: 0 24px 80px #06140e66; }
+.question-add-dialog h2 { margin: 7px 0 8px; font-size: 22px; }
+.question-add-dialog > p, .mistake-detail-editor > p { margin: 0; color: #718078; font-size: 10px; line-height: 1.7; }
+.question-add-dialog label, .mistake-detail-editor label { display: block; margin-top: 19px; color: #4e5c55; font-size: 11px; font-weight: 800; }
+.question-add-dialog label > span, .mistake-detail-editor label > span { float: right; color: #99a59e; font-size: 9px; font-weight: 400; }
+.question-add-dialog select, .question-add-dialog textarea, .mistake-detail-editor select, .mistake-detail-editor textarea { width: 100%; margin-top: 7px; border: 1px solid #d8e1dc; border-radius: 10px; background: #fbfcfb; padding: 11px; outline: 0; color: #233129; }
+.question-add-dialog textarea, .mistake-detail-editor textarea { min-height: 125px; resize: vertical; line-height: 1.65; }
+.question-add-dialog select:focus, .question-add-dialog textarea:focus, .mistake-detail-editor select:focus, .mistake-detail-editor textarea:focus { border-color: #4b9878; box-shadow: 0 0 0 3px #2d8d6920; }
 
 .capture-head { display: flex; align-items: center; gap: 11px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
 .capture-icon { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 11px; background: var(--green-soft); color: var(--green); font-size: 22px; }
@@ -178,9 +186,13 @@ button:disabled { cursor: not-allowed; }
 .mistake-grid { max-width: 1320px; margin: 0 auto; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 17px; align-items: start; }
 .mistake-card { overflow: hidden; border: 1px solid var(--line); border-radius: 15px; background: #fff; box-shadow: 0 6px 22px #21372d0b; }
 .mistake-card.mastered { opacity: .75; }
-.mistake-image { position: relative; min-height: 150px; display: grid; place-items: center; overflow: hidden; border-bottom: 1px solid #edf0ee; background: #f6f7f5; }
+.mistake-image { position: relative; width: 100%; min-height: 150px; display: grid; place-items: center; overflow: hidden; border: 0; border-bottom: 1px solid #edf0ee; background: #f6f7f5; padding: 0; text-align: left; }
 .mistake-image img { display: block; width: 100%; max-height: 300px; object-fit: contain; background: #fff; }
 .mistake-image > span { position: absolute; right: 10px; top: 10px; padding: 5px 8px; border-radius: 99px; background: #17714f; color: #fff; font-size: 9px; font-weight: 800; }
+.mistake-image > em { position: absolute; right: 10px; bottom: 10px; border-radius: 7px; background: #172e24d9; color: #fff; padding: 6px 8px; font-size: 9px; font-style: normal; font-weight: 800; opacity: 0; transform: translateY(3px); transition: .18s ease; }
+.mistake-image:hover > em, .mistake-image:focus-visible > em { opacity: 1; transform: none; }
+.mistake-image:hover img { transform: scale(1.015); }
+.mistake-image img { transition: transform .2s ease; }
 .image-loading { color: #8a9690; font-size: 10px; }
 .mistake-body { padding: 16px; }
 .mistake-tags { margin-bottom: 10px; }
@@ -190,6 +202,14 @@ button:disabled { cursor: not-allowed; }
 .mistake-actions { display: flex; justify-content: space-between; gap: 8px; margin-top: 15px; padding-top: 13px; border-top: 1px solid #eef1ef; }
 .mistake-actions button { border: 0; border-radius: 8px; background: var(--green-soft); color: var(--green); padding: 8px 10px; font-size: 9px; font-weight: 800; }
 .mistake-actions .delete-button { background: transparent; color: #a06e6e; }
+.mistake-detail-backdrop { z-index: 110; }
+.mistake-detail-dialog { position: relative; width: min(1180px, 96vw); height: min(760px, calc(100vh - 44px)); display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(300px, .55fr); overflow: hidden; border-radius: 20px; background: #fff; box-shadow: 0 24px 80px #06140e66; }
+.mistake-detail-image { min-width: 0; min-height: 0; display: grid; place-items: center; overflow: auto; background: #edf1ee; padding: 22px; }
+.mistake-detail-image img { display: block; width: auto; max-width: 100%; height: auto; max-height: 100%; object-fit: contain; background: #fff; box-shadow: 0 8px 28px #172e241f; }
+.mistake-detail-image .image-loading { min-height: 260px; display: grid; place-items: center; }
+.mistake-detail-editor { min-width: 0; overflow: auto; padding: 34px 28px 28px; }
+.mistake-detail-editor h2 { margin: 7px 38px 8px 0; font-size: 21px; line-height: 1.35; }
+.mistake-detail-editor textarea { min-height: 230px; }
 .mistakes-empty { max-width: 620px; margin: 70px auto; padding: 55px 25px; border: 1px solid var(--line); border-radius: 17px; background: #fff; text-align: center; }
 .mistakes-empty > div { width: 55px; height: 55px; display: grid; place-items: center; margin: 0 auto 15px; border-radius: 50%; background: var(--green-soft); color: var(--green); font-size: 22px; font-weight: 900; }
 .mistakes-empty h3 { margin: 0; font-size: 18px; }
@@ -243,6 +263,11 @@ button:disabled { cursor: not-allowed; }
   .mistake-search { flex-basis: 100%; }
   .mistake-grid { grid-template-columns: 1fr; }
   .github-dialog { padding: 25px 20px; }
+  .question-add-dialog { padding: 25px 20px; }
+  .mistake-detail-dialog { width: min(700px, 96vw); height: min(880px, calc(100vh - 24px)); grid-template-columns: 1fr; grid-template-rows: minmax(240px, 46%) minmax(0, 54%); }
+  .mistake-detail-image { padding: 12px; }
+  .mistake-detail-editor { padding: 24px 20px; }
+  .mistake-detail-editor textarea { min-height: 135px; }
   .dialog-actions { flex-direction: column-reverse; }
   .dialog-actions button { width: 100%; }
 }

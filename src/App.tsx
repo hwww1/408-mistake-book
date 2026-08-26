@@ -391,10 +391,17 @@ export default function Home() {
   const [draftSelection, setDraftSelection] = useState<Rect | null>(null);
   const [questionRegions, setQuestionRegions] = useState<QuestionRegion[]>([]);
   const [addingQuestionIndex, setAddingQuestionIndex] = useState<number | null>(null);
+  const [pendingQuestionRegion, setPendingQuestionRegion] = useState<QuestionRegion | null>(null);
+  const [pendingQuestionReason, setPendingQuestionReason] = useState('');
+  const [pendingQuestionNote, setPendingQuestionNote] = useState('');
   const [questionNo, setQuestionNo] = useState('');
   const [reason, setReason] = useState('');
   const [note, setNote] = useState('');
   const [mistakes, setMistakes] = useState<Mistake[]>([]);
+  const [detailMistake, setDetailMistake] = useState<Mistake | null>(null);
+  const [detailReason, setDetailReason] = useState('');
+  const [detailNote, setDetailNote] = useState('');
+  const [detailSaving, setDetailSaving] = useState(false);
   const [toast, setToast] = useState('');
   const [filterSubject, setFilterSubject] = useState('全部');
   const [filterStatus, setFilterStatus] = useState('待掌握');
@@ -788,20 +795,64 @@ export default function Home() {
     setToast('已加入错题本');
   }
 
-  async function addDetectedQuestion(region: QuestionRegion) {
+  function openDetectedQuestionDialog(region: QuestionRegion) {
     if (!selectedEntry) return;
     const mistakeId = `auto:${selectedEntry.id}:${pageNumber}:${region.index}`;
-    if (mistakes.some((mistake) => mistake.id === mistakeId)) {
-      setToast('这道题已经在错题本里了');
+    const existing = mistakes.find((mistake) => mistake.id === mistakeId);
+    if (existing) {
+      openMistakeDetail(existing);
       return;
     }
+    setPendingQuestionRegion(region);
+    setPendingQuestionReason('');
+    setPendingQuestionNote('');
+  }
+
+  async function addDetectedQuestion() {
+    const region = pendingQuestionRegion;
+    if (!selectedEntry || !region) return;
+    const mistakeId = `auto:${selectedEntry.id}:${pageNumber}:${region.index}`;
     setAddingQuestionIndex(region.index);
     try {
       const label = `第 ${pageNumber} 页 · 本页第 ${region.index + 1} 题`;
-      const saved = await saveCanvasRegion(region, { id: mistakeId, questionNo: label, reason: '未填写', note: '' });
-      if (saved) setToast(`${label}已加入错题本`);
+      const saved = await saveCanvasRegion(region, {
+        id: mistakeId,
+        questionNo: label,
+        reason: pendingQuestionReason,
+        note: pendingQuestionNote.trim(),
+      });
+      if (saved) {
+        setPendingQuestionRegion(null);
+        setPendingQuestionReason('');
+        setPendingQuestionNote('');
+        setToast(`${label}已加入错题本`);
+      }
     } finally {
       setAddingQuestionIndex(null);
+    }
+  }
+
+  function openMistakeDetail(mistake: Mistake) {
+    setDetailMistake(mistake);
+    setDetailReason(mistake.reason === '未填写' ? '' : mistake.reason);
+    setDetailNote(mistake.note || '');
+  }
+
+  async function saveMistakeDetail() {
+    if (!detailMistake) return;
+    setDetailSaving(true);
+    try {
+      const updated = {
+        ...detailMistake,
+        reason: detailReason || '未填写',
+        note: detailNote.trim(),
+      };
+      await putMistake(updated);
+      await refreshMistakes();
+      setDetailMistake(updated);
+      setToast('错误原因和笔记已保存');
+    } finally {
+      setDetailSaving(false);
     }
   }
 
@@ -939,7 +990,7 @@ export default function Home() {
                 <canvas ref={canvasRef} />
                 {questionRegions.map((region) => {
                   const alreadyAdded = mistakes.some((mistake) => mistake.id === `auto:${selectedEntry.id}:${pageNumber}:${region.index}`);
-                  return <div className="question-region" key={`${pageNumber}:${region.index}`} style={{ left: `${region.x / (canvasRef.current?.width || 1) * 100}%`, top: `${region.y / (canvasRef.current?.height || 1) * 100}%`, width: `${region.width / (canvasRef.current?.width || 1) * 100}%`, height: `${region.height / (canvasRef.current?.height || 1) * 100}%` }}><span>本页第 {region.index + 1} 题</span><button className={alreadyAdded ? 'added' : ''} disabled={addingQuestionIndex !== null} onPointerDown={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); void addDetectedQuestion(region); }}>{addingQuestionIndex === region.index ? '添加中…' : alreadyAdded ? '✓ 已加入' : '＋ 错题'}</button></div>;
+                  return <div className="question-region" key={`${pageNumber}:${region.index}`} style={{ left: `${region.x / (canvasRef.current?.width || 1) * 100}%`, top: `${region.y / (canvasRef.current?.height || 1) * 100}%`, width: `${region.width / (canvasRef.current?.width || 1) * 100}%`, height: `${region.height / (canvasRef.current?.height || 1) * 100}%` }}><span>本页第 {region.index + 1} 题</span><button className={alreadyAdded ? 'added' : ''} disabled={addingQuestionIndex !== null} onPointerDown={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); openDetectedQuestionDialog(region); }}>{addingQuestionIndex === region.index ? '添加中…' : alreadyAdded ? '✓ 查看' : '＋ 错题'}</button></div>;
                 })}
                 {activeRect && <div className={`selection-box ${selection ? 'done' : ''}`} style={{ left: activeRect.x, top: activeRect.y, width: activeRect.width, height: activeRect.height }}><span>{selection ? '已框选' : '松开完成'}</span></div>}
                 {readerMessage && <div className="reader-message"><i />{readerMessage}</div>}
@@ -970,9 +1021,34 @@ export default function Home() {
           <div className="mistakes-heading"><div><span>我的错题</span><h2>{mistakes.length} 道错题，{pendingCount} 道待掌握</h2></div><div className="heading-actions"><input ref={backupInputRef} className="backup-input" type="file" accept="application/json,.json" onChange={importBackup} /><button className="backup-button" onClick={() => backupInputRef.current?.click()}>导入备份</button><button className="backup-button" disabled={!mistakes.length} onClick={exportBackup}>导出备份</button><button className="print-button" disabled={!filteredMistakes.length} onClick={printMistakes}>打印 / 保存为 PDF</button></div></div>
           <div className="filterbar"><select value={filterSubject} onChange={(event) => setFilterSubject(event.target.value)}><option>全部</option>{SUBJECTS.map((subject) => <option key={subject.code} value={subject.code}>{subject.name}</option>)}</select><select value={filterStatus} onChange={(event) => setFilterStatus(event.target.value)}><option>全部状态</option><option>待掌握</option><option>已掌握</option></select><div className="mistake-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索章节、小节、页码或题目" /></div></div>
           <div className="sync-note"><b>换电脑使用：</b>旧电脑点击“导出备份”，在新电脑打开同一个网站后点击“导入备份”。PDF 和错题不会公开上传。</div>
-          {filteredMistakes.length ? <div className="mistake-grid">{filteredMistakes.map((mistake) => <article className={mistake.mastered ? 'mistake-card mastered' : 'mistake-card'} key={mistake.id}><div className="mistake-image"><MistakeImage image={mistake.image} alt={`${mistake.section} ${mistake.questionNo || ''}`} />{mistake.mastered && <span>已掌握</span>}</div><div className="mistake-body"><div className="mistake-tags"><span>{mistake.subjectCode}</span><span>{mistake.section.split(' ')[0]}</span><span>第{mistake.page}页</span></div><h3>{displayQuestionNo(mistake.questionNo)} · {mistake.reason}</h3><p className="mistake-path">{mistake.chapter} / {mistake.section}</p>{mistake.note && <p className="mistake-note">{mistake.note}</p>}<div className="mistake-actions"><button onClick={() => toggleMastered(mistake)}>{mistake.mastered ? '标记为待复习' : '✓ 我已掌握'}</button><button className="delete-button" onClick={() => deleteMistake(mistake)}>删除</button></div></div></article>)}</div> : <div className="mistakes-empty"><div>✓</div><h3>{mistakes.length ? '没有符合条件的错题' : '错题本还是空的'}</h3><p>{mistakes.length ? '换一个筛选条件再看看。' : '返回练习册，点击题目右侧的“＋错题”即可加入。'}</p><button onClick={() => setView('reader')}>返回练习册</button></div>}
+          {filteredMistakes.length ? <div className="mistake-grid">{filteredMistakes.map((mistake) => <article className={mistake.mastered ? 'mistake-card mastered' : 'mistake-card'} key={mistake.id}><button className="mistake-image" onClick={() => openMistakeDetail(mistake)} aria-label={`放大并编辑 ${displayQuestionNo(mistake.questionNo)}`}><MistakeImage image={mistake.image} alt={`${mistake.section} ${mistake.questionNo || ''}`} />{mistake.mastered && <span>已掌握</span>}<em>点击放大 · 编辑笔记</em></button><div className="mistake-body"><div className="mistake-tags"><span>{mistake.subjectCode}</span><span>{mistake.section.split(' ')[0]}</span><span>第{mistake.page}页</span></div><h3>{displayQuestionNo(mistake.questionNo)} · {mistake.reason}</h3><p className="mistake-path">{mistake.chapter} / {mistake.section}</p>{mistake.note && <p className="mistake-note">{mistake.note}</p>}<div className="mistake-actions"><button onClick={() => openMistakeDetail(mistake)}>放大 / 编辑</button><button onClick={() => toggleMastered(mistake)}>{mistake.mastered ? '标记为待复习' : '✓ 我已掌握'}</button><button className="delete-button" onClick={() => deleteMistake(mistake)}>删除</button></div></div></article>)}</div> : <div className="mistakes-empty"><div>✓</div><h3>{mistakes.length ? '没有符合条件的错题' : '错题本还是空的'}</h3><p>{mistakes.length ? '换一个筛选条件再看看。' : '返回练习册，点击题目右侧的“＋错题”即可加入。'}</p><button onClick={() => setView('reader')}>返回练习册</button></div>}
         </section>
       )}
+      {pendingQuestionRegion && selectedEntry && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && addingQuestionIndex === null) setPendingQuestionRegion(null); }}>
+        <section className="question-add-dialog" role="dialog" aria-modal="true" aria-labelledby="question-add-title">
+          <button className="dialog-close" onClick={() => setPendingQuestionRegion(null)} disabled={addingQuestionIndex !== null} aria-label="关闭">×</button>
+          <span className="dialog-kicker">保存前先补充信息</span>
+          <h2 id="question-add-title">加入本页第 {pendingQuestionRegion.index + 1} 题</h2>
+          <p>{selectedEntry.subject} · {selectedEntry.chapter} · {selectedEntry.section} · 第 {pageNumber} 页</p>
+          <label>错误原因 <span>选填</span><select value={pendingQuestionReason} onChange={(event) => setPendingQuestionReason(event.target.value)}><option value="">请选择</option>{REASONS.map((item) => <option key={item}>{item}</option>)}</select></label>
+          <label>我的笔记 <span>可以稍后继续修改</span><textarea value={pendingQuestionNote} onChange={(event) => setPendingQuestionNote(event.target.value)} placeholder="写下正确思路、易错点或以后要复习的内容…" /></label>
+          <div className="dialog-actions"><button className="dialog-cancel" onClick={() => setPendingQuestionRegion(null)} disabled={addingQuestionIndex !== null}>取消</button><button className="dialog-connect" onClick={() => void addDetectedQuestion()} disabled={addingQuestionIndex !== null}>{addingQuestionIndex !== null ? '正在加入…' : '确认加入错题本'}</button></div>
+        </section>
+      </div>}
+      {detailMistake && <div className="modal-backdrop mistake-detail-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !detailSaving) setDetailMistake(null); }}>
+        <section className="mistake-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="mistake-detail-title">
+          <button className="dialog-close" onClick={() => setDetailMistake(null)} disabled={detailSaving} aria-label="关闭">×</button>
+          <div className="mistake-detail-image"><MistakeImage image={detailMistake.image} alt={`${detailMistake.section} ${detailMistake.questionNo || ''}`} /></div>
+          <div className="mistake-detail-editor">
+            <span className="dialog-kicker">错题详情</span>
+            <h2 id="mistake-detail-title">{displayQuestionNo(detailMistake.questionNo)}</h2>
+            <p>{detailMistake.subject} · {detailMistake.chapter}<br />{detailMistake.section} · 第 {detailMistake.page} 页</p>
+            <label>错误原因<select value={detailReason} onChange={(event) => setDetailReason(event.target.value)}><option value="">请选择</option>{REASONS.map((item) => <option key={item}>{item}</option>)}</select></label>
+            <label>我的笔记 <span>可随时修改或追加</span><textarea value={detailNote} onChange={(event) => setDetailNote(event.target.value)} placeholder="补充正确思路、易错点或复习记录…" /></label>
+            <div className="dialog-actions"><button className="dialog-cancel" onClick={() => setDetailMistake(null)} disabled={detailSaving}>关闭</button><button className="dialog-connect" onClick={() => void saveMistakeDetail()} disabled={detailSaving}>{detailSaving ? '正在保存…' : '保存修改'}</button></div>
+          </div>
+        </section>
+      </div>}
       {githubDialogOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !githubConnecting) setGithubDialogOpen(false); }}>
         <section className="github-dialog" role="dialog" aria-modal="true" aria-labelledby="github-dialog-title">
           <button className="dialog-close" onClick={() => setGithubDialogOpen(false)} disabled={githubConnecting} aria-label="关闭">×</button>
