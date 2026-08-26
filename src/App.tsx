@@ -660,6 +660,7 @@ export default function Home() {
     renderToken.current += 1;
     setSelection(null);
     setDraftSelection(null);
+    setQuestionRegions([]);
     setPageNumber(1);
     setPageCount(0);
     setReaderError(false);
@@ -680,26 +681,39 @@ export default function Home() {
 
       const pdfjs = await import('pdfjs-dist/build/pdf.mjs');
       pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
-      timeout = window.setTimeout(() => {
-        timedOut = true;
-        controller.abort('timeout');
-        if (loadingTask) loadingTask.destroy().catch(() => undefined);
-      }, 120_000);
-      const file = await selectedEntry.handle.getFile(controller.signal);
-      if (cancelled) return;
-      loadingTask = pdfjs.getDocument({ data: await file.arrayBuffer() });
-      const document = await loadingTask.promise;
-      loadingTask = null;
-      if (cancelled) {
-        await (document as any).destroy();
-        return;
+      let lastError: unknown = null;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const file = await selectedEntry.handle.getFile(controller.signal);
+          if (cancelled) return;
+          loadingTask = pdfjs.getDocument({ data: await file.arrayBuffer() });
+          const document = await loadingTask.promise;
+          loadingTask = null;
+          if (cancelled) {
+            await (document as any).destroy();
+            return;
+          }
+          pdfDocumentRef.current = document;
+          setPdfDocument(document);
+          setPageCount(document.numPages);
+          setReaderMessage('');
+          return;
+        } catch (error) {
+          lastError = error;
+          if (loadingTask) await loadingTask.destroy().catch(() => undefined);
+          loadingTask = null;
+          if (cancelled || timedOut || attempt === 2) break;
+          await new Promise((resolve) => window.setTimeout(resolve, 600 * (attempt + 1)));
+        }
       }
-      pdfDocumentRef.current = document;
-      setPdfDocument(document);
-      setPageCount(document.numPages);
-      setReaderMessage('');
+      throw lastError;
     };
 
+    timeout = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort('timeout');
+      if (loadingTask) loadingTask.destroy().catch(() => undefined);
+    }, 120_000);
     loadDocument().catch((error) => {
       if (cancelled) return;
       setReaderError(true);
@@ -1025,9 +1039,9 @@ export default function Home() {
     setCodexReadyId(detailMistake.id);
     try {
       await navigator.clipboard.writeText(prompt);
-      setToast(siteToolsSupported ? '提问已复制，回到旁边的 Codex 对话发送即可' : '提问已复制，请在 Codex 内置浏览器中打开本站');
+      setToast(siteToolsSupported ? '提问已复制，回到旁边的 Codex 对话发送即可' : '提问已复制；开启 Codex Site tools 后即可读取当前题');
     } catch {
-      setToast(siteToolsSupported ? '当前错题已准备好，可以在旁边询问 Codex' : '请在 Codex 内置浏览器中打开本站');
+      setToast(siteToolsSupported ? '当前错题已准备好，可以在旁边询问 Codex' : '请开启 Codex 的 Site tools 后刷新本站');
     }
   }
 
@@ -1238,7 +1252,7 @@ export default function Home() {
             <p>{detailMistake.subject} · {detailMistake.chapter}<br />{detailMistake.section} · 第 {detailMistake.page} 页</p>
             <label>错误原因<select value={detailReason} onChange={(event) => setDetailReason(event.target.value)}><option value="">请选择</option>{REASONS.map((item) => <option key={item}>{item}</option>)}</select></label>
             <label>我的笔记 <span>可随时修改或追加</span><textarea value={detailNote} onChange={(event) => setDetailNote(event.target.value)} placeholder="补充正确思路、易错点或复习记录…" /></label>
-            {codexReadyId === detailMistake.id && <div className="codex-help"><b>{siteToolsSupported ? 'Codex 已能读取这道题' : '请在 Codex 内置浏览器中使用'}</b><span>{siteToolsSupported ? '回到旁边的对话，粘贴或直接说“帮我分析当前错题”。' : '在 Codex 内置浏览器打开本站后，Site tools 会自动连接，不需要 API。'}</span></div>}
+            {codexReadyId === detailMistake.id && <div className="codex-help"><b>{siteToolsSupported ? 'Codex 已能读取这道题' : 'Codex Site tools 尚未开启'}</b><span>{siteToolsSupported ? '回到旁边的对话，粘贴或直接说“帮我分析当前错题”。' : '在 Codex 中打开“设置 → 浏览器 → 权限”，开启 Site tools（站点工具）后刷新本站；不需要 API。'}</span></div>}
             <div className="dialog-actions detail-actions"><button className="dialog-cancel" onClick={() => setDetailMistake(null)} disabled={detailSaving}>关闭</button><button className="codex-button" onClick={() => void prepareCodexQuestion()} disabled={detailSaving}>✦ 问 Codex</button><button className="dialog-connect" onClick={() => void saveMistakeDetail()} disabled={detailSaving}>{detailSaving ? '正在保存…' : '保存修改'}</button></div>
           </div>
         </section>
