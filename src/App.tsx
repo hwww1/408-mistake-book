@@ -7,6 +7,8 @@ import {
   setSetting,
 } from './lib/db';
 import {
+  analyzeMistakeWithCodex,
+  type CodexAnalysis,
   type CompanionStatus,
   deleteMistakeSynced,
   fetchCompanionPdf,
@@ -56,6 +58,19 @@ type PdfEntry = {
 type Rect = { x: number; y: number; width: number; height: number };
 type QuestionRegion = Rect & { index: number };
 type View = 'reader' | 'mistakes';
+type SiteTool = {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  annotations?: Record<string, boolean>;
+  execute: (input: Record<string, unknown>) => unknown | Promise<unknown>;
+};
+type MistakeBookBridge = {
+  getCurrent: () => Record<string, unknown>;
+  list: (query: string) => Record<string, unknown>;
+  open: (id: string) => Record<string, unknown>;
+  update: (input: Record<string, unknown>) => Promise<Record<string, unknown>>;
+};
 
 const SUBJECTS = [
   { code: 'DS', name: '数据结构', tone: 'green' },
@@ -210,42 +225,6 @@ function blobToDataUrl(blob: Blob): Promise<string> {
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(blob);
   });
-}
-
-async function createChatGptQuestionCard(mistake: Mistake, reason: string, note: string): Promise<Blob> {
-  const bitmap = await createImageBitmap(mistake.image);
-  const width = Math.max(900, bitmap.width);
-  const imageHeight = Math.round(bitmap.height * width / bitmap.width);
-  const headerHeight = 190;
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = headerHeight + imageHeight;
-  const context = canvas.getContext('2d');
-  if (!context) throw new Error('浏览器无法生成题图');
-  context.fillStyle = '#ffffff';
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = '#173b3a';
-  context.font = 'bold 30px "Microsoft YaHei", sans-serif';
-  context.fillText('请像老师一样讲解这道题', 34, 48);
-  context.fillStyle = '#344b48';
-  context.font = '24px "Microsoft YaHei", sans-serif';
-  context.fillText('请说明：①考点 ②正确思路 ③易错原因 ④同类题检查步骤', 34, 88);
-  context.fillStyle = '#667572';
-  context.font = '20px "Microsoft YaHei", sans-serif';
-  context.fillText(`${mistake.subject} · ${mistake.chapter} · ${mistake.section} · 第 ${mistake.page} 页`, 34, 126);
-  context.fillText(`我的错因：${reason || '未填写'}${note.trim() ? `　笔记：${note.trim().slice(0, 46)}` : ''}`, 34, 162);
-  context.drawImage(bitmap, 0, headerHeight, width, imageHeight);
-  bitmap.close();
-  return await new Promise<Blob>((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('题图生成失败')), 'image/png'));
-}
-
-function downloadQuestionCard(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
 function dataUrlToBlob(dataUrl: string): Blob {
@@ -469,11 +448,15 @@ export default function Home() {
   const [detailReason, setDetailReason] = useState('');
   const [detailNote, setDetailNote] = useState('');
   const [detailSaving, setDetailSaving] = useState(false);
-  const [chatGptReadyId, setChatGptReadyId] = useState('');
-  const [chatGptMessage, setChatGptMessage] = useState('');
+  const [codexReadyId, setCodexReadyId] = useState('');
+  const [codexBusy, setCodexBusy] = useState(false);
+  const [codexAnalysis, setCodexAnalysis] = useState<CodexAnalysis | null>(null);
   const [companionStatus, setCompanionStatus] = useState<CompanionStatus | null>(null);
+  const [siteToolsSupported, setSiteToolsSupported] = useState(false);
   const [toast, setToast] = useState('');
   const [filterSubject, setFilterSubject] = useState('全部');
+  const [filterChapter, setFilterChapter] = useState('全部章节');
+  const [filterSection, setFilterSection] = useState('全部小节');
   const [filterStatus, setFilterStatus] = useState('待掌握');
   const [search, setSearch] = useState('');
   const [sidebarSearch, setSidebarSearch] = useState('');
@@ -492,6 +475,9 @@ export default function Home() {
   const pdfDocumentRef = useRef<any>(null);
   const autoRecoveryRef = useRef({ entryId: '', attempts: 0 });
   const companionStartedRef = useRef(false);
+  const mistakesRef = useRef<Mistake[]>([]);
+  const detailMistakeRef = useRef<Mistake | null>(null);
+  const detailDraftRef = useRef({ reason: '', note: '' });
 
   const refreshMistakes = useCallback(async () => {
     setMistakes(await listMistakes());
@@ -572,6 +558,158 @@ export default function Home() {
     void connectCompanion();
     return () => { stopped = true; };
   }, [activateFiles, refreshMistakes]);
+
+  useEffect(() => {
+    mistakesRef.current = mistakes;
+    detailMistakeRef.current = detailMistake;
+    detailDraftRef.current = { reason: detailReason, note: detailNote };
+    const siteWindow = window as Window & { __mistakeBookBridge?: MistakeBookBridge };
+    const summarize = (mistake: Mistake) => ({
+      id: mistake.id,
+      subject: mistake.subject,
+      chapter: mistake.chapter,
+      section: mistake.section,
+      page: mistake.page,
+      questionNo: displayQuestionNo(mistake.questionNo),
+      reason: mistake.reason,
+      note: mistake.note,
+      mastered: mistake.mastered,
+    });
+    const bridge: MistakeBookBridge = {
+      getCurrent: () => {
+        const current = detailMistakeRef.current;
+        if (!current) return { found: false, message: '请先在“我的错题”中打开一道题目。' };
+        return {
+          found: true,
+          ...summarize(current),
+          reason: detailDraftRef.current.reason || '未填写',
+          note: detailDraftRef.current.note,
+          imageHint: '题目图片正在网页的错题详情弹窗左侧显示，可直接查看页面。',
+        };
+      },
+      list: (query) => {
+        const normalized = query.trim().toLowerCase();
+        const rows = mistakesRef.current.filter((mistake) => !normalized || `${mistake.subject} ${mistake.chapter} ${mistake.section} ${mistake.questionNo} ${mistake.reason} ${mistake.note}`.toLowerCase().includes(normalized));
+        return { count: rows.length, mistakes: rows.slice(0, 50).map(summarize) };
+      },
+      open: (id) => {
+        const target = mistakesRef.current.find((mistake) => mistake.id === id);
+        if (!target) return { opened: false, message: '没有找到这道错题。' };
+        setView('mistakes');
+        openMistakeDetail(target);
+        return { opened: true, mistake: summarize(target), imageHint: '题目图片已在网页中放大显示。' };
+      },
+      update: async (input) => {
+        const id = typeof input.id === 'string' ? input.id : detailMistakeRef.current?.id;
+        const current = mistakesRef.current.find((mistake) => mistake.id === id);
+        if (!current) return { updated: false, message: '没有找到要更新的错题。' };
+        const reasonInput = typeof input.reason === 'string' ? input.reason : undefined;
+        const reasonValue = reasonInput && REASONS.includes(reasonInput) ? reasonInput : current.reason;
+        const addition = typeof input.noteToAppend === 'string' ? input.noteToAppend.trim() : '';
+        const nextNote = addition ? [current.note.trim(), addition].filter(Boolean).join('\n\n') : current.note;
+        const updated = {
+          ...current,
+          reason: reasonValue,
+          note: nextNote,
+          mastered: typeof input.mastered === 'boolean' ? input.mastered : current.mastered,
+        };
+        const saved = await saveMistakeSynced(updated);
+        await refreshMistakes();
+        if (detailMistakeRef.current?.id === saved.id) {
+          setDetailMistake(saved);
+          setDetailReason(saved.reason === '未填写' ? '' : saved.reason);
+          setDetailNote(saved.note);
+        }
+        return { updated: true, mistake: summarize(saved) };
+      },
+    };
+    siteWindow.__mistakeBookBridge = bridge;
+    return () => {
+      if (siteWindow.__mistakeBookBridge === bridge) delete siteWindow.__mistakeBookBridge;
+    };
+  }, [detailMistake, detailNote, detailReason, mistakes, refreshMistakes]);
+
+  useEffect(() => {
+    const siteDocument = document as Document & {
+      modelContext?: { registerTool: (tool: SiteTool) => void | Promise<void> };
+    };
+    const siteWindow = window as Window & {
+      __mistakeBookBridge?: MistakeBookBridge;
+      __mistakeBookToolsRegistered?: boolean;
+    };
+    let stopped = false;
+    let timer = 0;
+    const callBridge = <T extends keyof MistakeBookBridge>(method: T, ...args: Parameters<MistakeBookBridge[T]>) => {
+      const bridge = siteWindow.__mistakeBookBridge;
+      if (!bridge) return { error: '错题本页面尚未准备好，请稍后再试。' };
+      return (bridge[method] as (...values: Parameters<MistakeBookBridge[T]>) => ReturnType<MistakeBookBridge[T]>)(...args);
+    };
+    const register = async () => {
+      if (stopped || typeof siteDocument.modelContext?.registerTool !== 'function') return false;
+      setSiteToolsSupported(true);
+      if (siteWindow.__mistakeBookToolsRegistered) return true;
+      const tools: SiteTool[] = [
+        {
+          name: 'get_current_mistake',
+          description: '读取用户当前在 408 错题本中放大打开的题目、章节、错误原因和笔记。题目图片同时显示在当前网页中。',
+          inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+          annotations: { readOnlyHint: true },
+          execute: async () => callBridge('getCurrent'),
+        },
+        {
+          name: 'list_mistakes',
+          description: '按科目、章节、题号、错因或笔记关键词检索 408 错题本。',
+          inputSchema: {
+            type: 'object',
+            properties: { query: { type: 'string', description: '可选的搜索关键词，留空返回最近的错题。' } },
+            additionalProperties: false,
+          },
+          annotations: { readOnlyHint: true },
+          execute: async (input) => callBridge('list', typeof input.query === 'string' ? input.query : ''),
+        },
+        {
+          name: 'open_mistake',
+          description: '在当前网页中打开并放大指定错题，让用户和 Codex 一起查看题目图片。',
+          inputSchema: {
+            type: 'object',
+            properties: { id: { type: 'string', description: 'list_mistakes 返回的错题 id。' } },
+            required: ['id'],
+            additionalProperties: false,
+          },
+          annotations: { readOnlyHint: true },
+          execute: async (input) => callBridge('open', String(input.id || '')),
+        },
+        {
+          name: 'update_mistake_learning',
+          description: '把 Codex 的简短分析追加进错题笔记，并可更新错误原因或掌握状态；不会删除原笔记。',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: '错题 id；省略时更新当前打开的错题。' },
+              noteToAppend: { type: 'string', description: '要追加到原笔记末尾的学习结论。' },
+              reason: { type: 'string', enum: REASONS },
+              mastered: { type: 'boolean' },
+            },
+            additionalProperties: false,
+          },
+          annotations: { readOnlyHint: false, destructiveHint: false },
+          execute: async (input) => callBridge('update', input),
+        },
+      ];
+      for (const tool of tools) await siteDocument.modelContext.registerTool(tool);
+      siteWindow.__mistakeBookToolsRegistered = true;
+      return true;
+    };
+    const waitForSupport = async () => {
+      if (await register()) return;
+      timer = window.setTimeout(waitForSupport, 600);
+    };
+    void waitForSupport();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, []);
 
   useEffect(() => {
     if (!toast) return;
@@ -726,14 +864,37 @@ export default function Home() {
     return [...groups.entries()];
   }, [entriesForSubject]);
 
+  const mistakeChapterOptions = useMemo(() => [...new Set(mistakes
+    .filter((mistake) => filterSubject === '全部' || mistake.subjectCode === filterSubject)
+    .map((mistake) => mistake.chapter))].sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true })), [filterSubject, mistakes]);
+
+  const mistakeSectionOptions = useMemo(() => [...new Set(mistakes
+    .filter((mistake) => (filterSubject === '全部' || mistake.subjectCode === filterSubject)
+      && (filterChapter === '全部章节' || mistake.chapter === filterChapter))
+    .map((mistake) => mistake.section))].sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true })), [filterChapter, filterSubject, mistakes]);
+
   const filteredMistakes = useMemo(() => mistakes.filter((mistake) => {
     if (filterSubject !== '全部' && mistake.subjectCode !== filterSubject) return false;
+    if (filterChapter !== '全部章节' && mistake.chapter !== filterChapter) return false;
+    if (filterSection !== '全部小节' && mistake.section !== filterSection) return false;
     if (filterStatus === '待掌握' && mistake.mastered) return false;
     if (filterStatus === '已掌握' && !mistake.mastered) return false;
     const query = search.trim().toLowerCase();
     if (!query) return true;
     return `${mistake.subject} ${mistake.chapter} ${mistake.section} ${mistake.questionNo} ${mistake.reason} ${mistake.note}`.toLowerCase().includes(query);
-  }), [filterStatus, filterSubject, mistakes, search]);
+  }), [filterChapter, filterSection, filterStatus, filterSubject, mistakes, search]);
+
+  const groupedMistakes = useMemo(() => {
+    const groups = new Map<string, Mistake[]>();
+    filteredMistakes.forEach((mistake) => {
+      const key = `${mistake.subjectCode}|||${mistake.chapter}`;
+      groups.set(key, [...(groups.get(key) || []), mistake]);
+    });
+    return [...groups.entries()].map(([key, items]) => {
+      const [subjectCode, chapter] = key.split('|||');
+      return { subjectCode, subject: items[0]?.subject || subjectCode, chapter, items };
+    });
+  }, [filteredMistakes]);
 
   async function connectFolder() {
     const picker = (window as unknown as {
@@ -981,33 +1142,49 @@ export default function Home() {
     setDetailMistake(mistake);
     setDetailReason(mistake.reason === '未填写' ? '' : mistake.reason);
     setDetailNote(mistake.note || '');
-    setChatGptReadyId('');
-    setChatGptMessage('');
+    setCodexReadyId('');
+    setCodexAnalysis(null);
   }
 
-  async function askOrdinaryChatGpt() {
+  async function prepareCodexQuestion() {
     if (!detailMistake) return;
-    setChatGptReadyId(detailMistake.id);
-    const opened = window.open('https://chatgpt.com/', '_blank', 'noopener,noreferrer');
-    try {
-      const card = await createChatGptQuestionCard(detailMistake, detailReason, detailNote);
-      if (navigator.clipboard?.write && typeof ClipboardItem !== 'undefined') {
-        try {
-          await navigator.clipboard.write([new ClipboardItem({ 'image/png': card })]);
-          const message = `${opened ? '普通 ChatGPT 已打开；' : ''}题图已复制。进入 ChatGPT 后按 Ctrl+V 粘贴，再发送即可；不会调用 Codex。`;
-          setChatGptMessage(message);
-          setToast('题图已复制，去普通 ChatGPT 粘贴发送即可');
-          return;
-        } catch {
-          // Some browsers block programmatic image clipboard writes; downloading is the reliable fallback.
-        }
+    setCodexReadyId(detailMistake.id);
+    if (companionStatus?.connected) {
+      if (!companionStatus.auth.connected) {
+        setCodexAnalysis({ analysis: '本地助手已经运行，但 Codex 尚未登录。请先在 Codex 桌面应用中登录。', noteToAppend: '' });
+        return;
       }
-      downloadQuestionCard(card, `408-${detailMistake.section}-${displayQuestionNo(detailMistake.questionNo)}.png`);
-      const message = `${opened ? '普通 ChatGPT 已打开；' : ''}浏览器不允许自动复制图片，题图已下载。把下载的图片拖入 ChatGPT 后发送即可。`;
-      setChatGptMessage(message);
-      setToast('题图已下载，请拖入普通 ChatGPT');
-    } catch (error) {
-      setChatGptMessage(`准备题图失败：${(error as Error).message}。你仍可保存题图后，在普通 ChatGPT 中上传询问。`);
+      setCodexBusy(true);
+      setCodexAnalysis(null);
+      try {
+        const draft = {
+          ...detailMistake,
+          reason: detailReason || '未填写',
+          note: detailNote.trim(),
+        };
+        const result = await analyzeMistakeWithCodex(draft);
+        const nextReason = detailReason || result.suggestedReason || '未填写';
+        const nextNote = [detailNote.trim(), result.noteToAppend.trim()].filter(Boolean).join('\n\n');
+        const saved = await saveMistakeSynced({ ...draft, reason: nextReason, note: nextNote });
+        setDetailMistake(saved);
+        setDetailReason(saved.reason === '未填写' ? '' : saved.reason);
+        setDetailNote(saved.note);
+        setCodexAnalysis(result);
+        await refreshMistakes();
+        setToast('Codex 分析完成，精炼结论已加入笔记并同步');
+      } catch (error) {
+        setCodexAnalysis({ analysis: `分析失败：${(error as Error).message}`, noteToAppend: '' });
+      } finally {
+        setCodexBusy(false);
+      }
+      return;
+    }
+    const prompt = '请分析我在 408 错题收集器中当前打开的错题。先调用 get_current_mistake 读取章节、错误原因和笔记，再查看网页左侧的题目图片，告诉我：①考点；②正确思路；③我为什么容易错；④下次遇到同类题的检查步骤。最后把简短结论追加到这道题的笔记中。';
+    try {
+      await navigator.clipboard.writeText(prompt);
+      setToast(siteToolsSupported ? '提问已复制，回到旁边的 Codex 对话发送即可' : '提问已复制；开启 Codex Site tools 后即可读取当前题');
+    } catch {
+      setToast(siteToolsSupported ? '当前错题已准备好，可以在旁边询问 Codex' : '请开启 Codex 的 Site tools 后刷新本站');
     }
   }
 
@@ -1117,7 +1294,7 @@ export default function Home() {
           <span><b>408 错题收集器</b><small>每题一点，自动加入错题本</small></span>
         </button>
         <div className="top-actions">
-          <span className="privacy-pill"><i />{companionStatus?.connected ? `OneDrive 自动同步 · 本机 ${companionStatus.libraryCount} 份分节 PDF` : '错题本地保存 · PDF 私有读取'} · 普通 ChatGPT 提问</span>
+          <span className="privacy-pill"><i />{companionStatus?.connected ? `OneDrive 自动同步 · 本机 ${companionStatus.libraryCount} 份分节 PDF` : '错题本地保存 · PDF 私有读取'}{companionStatus?.auth.connected || siteToolsSupported ? ' · Codex 已连接' : ''}</span>
           <button className={view === 'mistakes' ? 'ghost-button active' : 'ghost-button'} onClick={() => { setMobilePanel(null); setView(view === 'reader' ? 'mistakes' : 'reader'); }}>
             {view === 'reader' ? '我的错题' : '返回练习册'} <b>{mistakes.length}</b>
           </button>
@@ -1192,9 +1369,9 @@ export default function Home() {
       ) : (
         <section className="mistakes-view">
           <div className="mistakes-heading"><div><span>我的错题</span><h2>{mistakes.length} 道错题，{pendingCount} 道待掌握</h2></div><div className="heading-actions"><input ref={backupInputRef} className="backup-input" type="file" accept="application/json,.json" onChange={importBackup} /><button className="backup-button" onClick={() => backupInputRef.current?.click()}>导入备份</button><button className="backup-button" disabled={!mistakes.length} onClick={exportBackup}>导出备份</button><button className="print-button" disabled={!filteredMistakes.length} onClick={printMistakes}>打印 / 保存为 PDF</button></div></div>
-          <div className="filterbar"><select value={filterSubject} onChange={(event) => setFilterSubject(event.target.value)}><option>全部</option>{SUBJECTS.map((subject) => <option key={subject.code} value={subject.code}>{subject.name}</option>)}</select><select value={filterStatus} onChange={(event) => setFilterStatus(event.target.value)}><option>全部状态</option><option>待掌握</option><option>已掌握</option></select><div className="mistake-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索章节、小节、页码或题目" /></div></div>
-          <div className="sync-note"><b>{companionStatus?.connected ? '双电脑自动同步已开启：' : '换电脑使用：'}</b>{companionStatus?.connected ? `错题、错因和笔记保存在 OneDrive；当前读取 ${companionStatus.libraryRoot}。提问会打开普通 ChatGPT，不调用 Codex。` : '旧电脑点击“导出备份”，在新电脑打开同一个网站后点击“导入备份”。PDF 和错题不会公开上传。'}</div>
-          {filteredMistakes.length ? <div className="mistake-grid">{filteredMistakes.map((mistake) => <article className={mistake.mastered ? 'mistake-card mastered' : 'mistake-card'} key={mistake.id}><button className="mistake-image" onClick={() => openMistakeDetail(mistake)} aria-label={`放大并编辑 ${displayQuestionNo(mistake.questionNo)}`}><MistakeImage image={mistake.image} alt={`${mistake.section} ${mistake.questionNo || ''}`} />{mistake.mastered && <span>已掌握</span>}<em>点击放大 · 编辑笔记</em></button><div className="mistake-body"><div className="mistake-tags"><span>{mistake.subjectCode}</span><span>{mistake.section.split(' ')[0]}</span><span>第{mistake.page}页</span></div><h3>{displayQuestionNo(mistake.questionNo)} · {mistake.reason}</h3><p className="mistake-path">{mistake.chapter} / {mistake.section}</p>{mistake.note && <p className="mistake-note">{mistake.note}</p>}<div className="mistake-actions"><button onClick={() => openMistakeDetail(mistake)}>放大 / 编辑</button><button onClick={() => toggleMastered(mistake)}>{mistake.mastered ? '标记为待复习' : '✓ 我已掌握'}</button><button className="delete-button" onClick={() => deleteMistake(mistake)}>删除</button></div></div></article>)}</div> : <div className="mistakes-empty"><div>✓</div><h3>{mistakes.length ? '没有符合条件的错题' : '错题本还是空的'}</h3><p>{mistakes.length ? '换一个筛选条件再看看。' : '返回练习册，点击题目右侧的“＋错题”即可加入。'}</p><button onClick={() => setView('reader')}>返回练习册</button></div>}
+          <div className="filterbar"><select value={filterSubject} onChange={(event) => { setFilterSubject(event.target.value); setFilterChapter('全部章节'); setFilterSection('全部小节'); }}><option>全部</option>{SUBJECTS.map((subject) => <option key={subject.code} value={subject.code}>{subject.name}</option>)}</select><select value={filterChapter} onChange={(event) => { setFilterChapter(event.target.value); setFilterSection('全部小节'); }}><option>全部章节</option>{mistakeChapterOptions.map((chapter) => <option key={chapter}>{chapter}</option>)}</select><select value={filterSection} onChange={(event) => setFilterSection(event.target.value)}><option>全部小节</option>{mistakeSectionOptions.map((section) => <option key={section}>{section}</option>)}</select><select value={filterStatus} onChange={(event) => setFilterStatus(event.target.value)}><option>全部状态</option><option>待掌握</option><option>已掌握</option></select><div className="mistake-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索章节、小节、页码或题目" /></div></div>
+          <div className="sync-note"><b>{companionStatus?.connected ? '双电脑自动同步已开启：' : '换电脑使用：'}</b>{companionStatus?.connected ? `错题、错因、笔记和 Codex 分析保存在 OneDrive；当前读取 ${companionStatus.libraryRoot}。` : '旧电脑点击“导出备份”，在新电脑打开同一个网站后点击“导入备份”。PDF 和错题不会公开上传。'}</div>
+          {filteredMistakes.length ? <div className="mistake-chapter-list">{groupedMistakes.map((group) => <section className="mistake-chapter-group" key={`${group.subjectCode}:${group.chapter}`}><div className="mistake-chapter-heading"><div><span>{group.subjectCode}</span><h3>{group.subject} · {group.chapter}</h3></div><b>{group.items.length} 道</b></div><div className="mistake-grid">{group.items.map((mistake) => <article className={mistake.mastered ? 'mistake-card mastered' : 'mistake-card'} key={mistake.id}><button className="mistake-image" onClick={() => openMistakeDetail(mistake)} aria-label={`放大并编辑 ${displayQuestionNo(mistake.questionNo)}`}><MistakeImage image={mistake.image} alt={`${mistake.section} ${mistake.questionNo || ''}`} />{mistake.mastered && <span>已掌握</span>}<em>点击放大 · 编辑笔记</em></button><div className="mistake-body"><div className="mistake-tags"><span>{mistake.subjectCode}</span><span>{mistake.section.split(' ')[0]}</span><span>第{mistake.page}页</span></div><h3>{displayQuestionNo(mistake.questionNo)} · {mistake.reason}</h3><p className="mistake-path">{mistake.chapter} / {mistake.section}</p>{mistake.note && <p className="mistake-note">{mistake.note}</p>}<div className="mistake-actions"><button onClick={() => openMistakeDetail(mistake)}>放大 / 编辑</button><button onClick={() => toggleMastered(mistake)}>{mistake.mastered ? '标记为待复习' : '✓ 我已掌握'}</button><button className="delete-button" onClick={() => deleteMistake(mistake)}>删除</button></div></div></article>)}</div></section>)}</div> : <div className="mistakes-empty"><div>✓</div><h3>{mistakes.length ? '没有符合条件的错题' : '错题本还是空的'}</h3><p>{mistakes.length ? '换一个科目、章节或小节再看看。' : '返回练习册，点击题目右侧的“＋错题”即可加入。'}</p><button onClick={() => setView('reader')}>返回练习册</button></div>}
         </section>
       )}
       {pendingQuestionRegion && selectedEntry && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && addingQuestionIndex === null) setPendingQuestionRegion(null); }}>
@@ -1208,9 +1385,9 @@ export default function Home() {
           <div className="dialog-actions"><button className="dialog-cancel" onClick={() => setPendingQuestionRegion(null)} disabled={addingQuestionIndex !== null}>取消</button><button className="dialog-connect" onClick={() => void addDetectedQuestion()} disabled={addingQuestionIndex !== null}>{addingQuestionIndex !== null ? '正在加入…' : '确认加入错题本'}</button></div>
         </section>
       </div>}
-      {detailMistake && <div className="modal-backdrop mistake-detail-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !detailSaving) setDetailMistake(null); }}>
+      {detailMistake && <div className="modal-backdrop mistake-detail-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !detailSaving && !codexBusy) setDetailMistake(null); }}>
         <section className="mistake-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="mistake-detail-title">
-          <button className="dialog-close" onClick={() => setDetailMistake(null)} disabled={detailSaving} aria-label="关闭">×</button>
+          <button className="dialog-close" onClick={() => setDetailMistake(null)} disabled={detailSaving || codexBusy} aria-label="关闭">×</button>
           <div className="mistake-detail-image"><MistakeImage image={detailMistake.image} alt={`${detailMistake.section} ${detailMistake.questionNo || ''}`} /></div>
           <div className="mistake-detail-editor">
             <span className="dialog-kicker">错题详情</span>
@@ -1218,8 +1395,8 @@ export default function Home() {
             <p>{detailMistake.subject} · {detailMistake.chapter}<br />{detailMistake.section} · 第 {detailMistake.page} 页</p>
             <label>错误原因<select value={detailReason} onChange={(event) => setDetailReason(event.target.value)}><option value="">请选择</option>{REASONS.map((item) => <option key={item}>{item}</option>)}</select></label>
             <label>我的笔记 <span>可随时修改或追加</span><textarea value={detailNote} onChange={(event) => setDetailNote(event.target.value)} placeholder="补充正确思路、易错点或复习记录…" /></label>
-            {chatGptReadyId === detailMistake.id && <div className="codex-help"><b>普通 ChatGPT 提问已准备</b><span>{chatGptMessage}</span></div>}
-            <div className="dialog-actions detail-actions"><button className="dialog-cancel" onClick={() => setDetailMistake(null)} disabled={detailSaving}>关闭</button><button className="codex-button" onClick={() => void askOrdinaryChatGpt()} disabled={detailSaving}>✦ 问普通 ChatGPT</button><button className="dialog-connect" onClick={() => void saveMistakeDetail()} disabled={detailSaving}>{detailSaving ? '正在保存…' : '保存修改'}</button></div>
+            {codexReadyId === detailMistake.id && <div className="codex-help"><b>{companionStatus?.connected ? (codexBusy ? 'Codex 正在分析这道题…' : codexAnalysis ? 'Codex 分析已完成' : '本地 Codex 已连接') : siteToolsSupported ? 'Codex 已能读取这道题' : '尚未连接本地 408 AI 助手'}</b><span>{companionStatus?.connected ? (codexBusy ? '正在读取题目图片并生成考点、错因和检查步骤，请稍候。' : codexAnalysis?.analysis || '点击“AI 分析”后会直接调用你的 Codex 订阅，不需要 API。') : siteToolsSupported ? '回到旁边的对话，粘贴或直接说“帮我分析当前错题”。' : '请从桌面启动“408 AI 错题助手”；没有本地助手时仍可复制提问。'}</span></div>}
+            <div className="dialog-actions detail-actions"><button className="dialog-cancel" onClick={() => setDetailMistake(null)} disabled={detailSaving || codexBusy}>关闭</button><button className="codex-button" onClick={() => void prepareCodexQuestion()} disabled={detailSaving || codexBusy}>{codexBusy ? '分析中…' : companionStatus?.connected ? '✦ AI 分析' : '✦ 问 Codex'}</button><button className="dialog-connect" onClick={() => void saveMistakeDetail()} disabled={detailSaving || codexBusy}>{detailSaving ? '正在保存…' : '保存修改'}</button></div>
           </div>
         </section>
       </div>}
