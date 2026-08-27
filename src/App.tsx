@@ -9,12 +9,14 @@ import {
 import {
   analyzeMistakeWithCodex,
   type CodexAnalysis,
+  type CodexSummary,
   type CompanionStatus,
   deleteMistakeSynced,
   fetchCompanionPdf,
   getCompanionLibrary,
   getCompanionStatus,
   saveMistakeSynced,
+  summarizeMistakesWithCodex,
   syncMistakesWithCompanion,
 } from './lib/companion';
 
@@ -249,6 +251,28 @@ function displayQuestionNo(value: string) {
   return value.includes('本页第') ? value : `第 ${value} 题`;
 }
 
+function questionSequence(mistake: Mistake) {
+  const pageQuestion = mistake.questionNo.match(/本页第\s*(\d+)/)?.[1];
+  const plainQuestion = mistake.questionNo.match(/\d+/)?.[0];
+  const autoIndex = mistake.id.match(/:(\d+)$/)?.[1];
+  return Number(pageQuestion || plainQuestion || autoIndex || Number.MAX_SAFE_INTEGER);
+}
+
+function compareMistakes(a: Mistake, b: Mistake) {
+  const subjectA = SUBJECTS.findIndex((subject) => subject.code === a.subjectCode);
+  const subjectB = SUBJECTS.findIndex((subject) => subject.code === b.subjectCode);
+  const subjectOrder = (subjectA < 0 ? 99 : subjectA) - (subjectB < 0 ? 99 : subjectB);
+  if (subjectOrder) return subjectOrder;
+  const chapterOrder = a.chapter.localeCompare(b.chapter, 'zh-CN', { numeric: true, sensitivity: 'base' });
+  if (chapterOrder) return chapterOrder;
+  const sectionOrder = a.section.localeCompare(b.section, 'zh-CN', { numeric: true, sensitivity: 'base' });
+  if (sectionOrder) return sectionOrder;
+  if (a.page !== b.page) return a.page - b.page;
+  const questionOrder = questionSequence(a) - questionSequence(b);
+  if (questionOrder) return questionOrder;
+  return a.createdAt.localeCompare(b.createdAt);
+}
+
 function detectQuestionRegions(canvas: HTMLCanvasElement): QuestionRegion[] {
   const context = canvas.getContext('2d', { willReadFrequently: true });
   if (!context || !canvas.width || !canvas.height) return [];
@@ -448,6 +472,9 @@ export default function Home() {
   const [detailReason, setDetailReason] = useState('');
   const [detailNote, setDetailNote] = useState('');
   const [detailSaving, setDetailSaving] = useState(false);
+  const [detailEditorSide, setDetailEditorSide] = useState<'left' | 'right'>('right');
+  const [detailEditorSize, setDetailEditorSize] = useState<'compact' | 'normal' | 'wide'>('normal');
+  const [detailNoteScale, setDetailNoteScale] = useState(1);
   const [codexReadyId, setCodexReadyId] = useState('');
   const [codexBusy, setCodexBusy] = useState(false);
   const [codexAnalysis, setCodexAnalysis] = useState<CodexAnalysis | null>(null);
@@ -458,6 +485,11 @@ export default function Home() {
   const [filterChapter, setFilterChapter] = useState('全部章节');
   const [filterSection, setFilterSection] = useState('全部小节');
   const [filterStatus, setFilterStatus] = useState('待掌握');
+  const [summaryOpen, setSummaryOpen] = useState(false);
+  const [summaryScope, setSummaryScope] = useState<'chapter' | 'section'>('chapter');
+  const [summaryBusy, setSummaryBusy] = useState(false);
+  const [summaryResult, setSummaryResult] = useState<CodexSummary | null>(null);
+  const [summaryError, setSummaryError] = useState('');
   const [search, setSearch] = useState('');
   const [sidebarSearch, setSidebarSearch] = useState('');
   const [githubDialogOpen, setGithubDialogOpen] = useState(false);
@@ -873,7 +905,9 @@ export default function Home() {
       && (filterChapter === '全部章节' || mistake.chapter === filterChapter))
     .map((mistake) => mistake.section))].sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true })), [filterChapter, filterSubject, mistakes]);
 
-  const filteredMistakes = useMemo(() => mistakes.filter((mistake) => {
+  const orderedMistakes = useMemo(() => [...mistakes].sort(compareMistakes), [mistakes]);
+
+  const filteredMistakes = useMemo(() => orderedMistakes.filter((mistake) => {
     if (filterSubject !== '全部' && mistake.subjectCode !== filterSubject) return false;
     if (filterChapter !== '全部章节' && mistake.chapter !== filterChapter) return false;
     if (filterSection !== '全部小节' && mistake.section !== filterSection) return false;
@@ -882,7 +916,14 @@ export default function Home() {
     const query = search.trim().toLowerCase();
     if (!query) return true;
     return `${mistake.subject} ${mistake.chapter} ${mistake.section} ${mistake.questionNo} ${mistake.reason} ${mistake.note}`.toLowerCase().includes(query);
-  }), [filterChapter, filterSection, filterStatus, filterSubject, mistakes, search]);
+  }), [filterChapter, filterSection, filterStatus, filterSubject, orderedMistakes, search]);
+
+  const detailNavigation = useMemo(() => {
+    if (!detailMistake) return { items: filteredMistakes, index: -1, previous: null, next: null };
+    const items = filteredMistakes.some((mistake) => mistake.id === detailMistake.id) ? filteredMistakes : orderedMistakes;
+    const index = items.findIndex((mistake) => mistake.id === detailMistake.id);
+    return { items, index, previous: index > 0 ? items[index - 1] : null, next: index >= 0 && index < items.length - 1 ? items[index + 1] : null };
+  }, [detailMistake, filteredMistakes, orderedMistakes]);
 
   const groupedMistakes = useMemo(() => {
     const groups = new Map<string, Mistake[]>();
@@ -1146,6 +1187,54 @@ export default function Home() {
     setCodexAnalysis(null);
   }
 
+  function navigateMistake(mistake: Mistake | null) {
+    if (!mistake || detailSaving || codexBusy) return;
+    openMistakeDetail(mistake);
+  }
+
+  function openSummary() {
+    if (filterSubject === '全部' || filterChapter === '全部章节') {
+      setToast('请先选择一个科目和章节，再生成 AI 总结');
+      return;
+    }
+    setSummaryScope(filterSection === '全部小节' ? 'chapter' : 'section');
+    setSummaryResult(null);
+    setSummaryError('');
+    setSummaryOpen(true);
+  }
+
+  async function generateSummary() {
+    if (filterSubject === '全部' || filterChapter === '全部章节') return;
+    if (summaryScope === 'section' && filterSection === '全部小节') {
+      setSummaryError('请先关闭窗口，在上方选择一个具体小节。');
+      return;
+    }
+    const items = orderedMistakes.filter((mistake) => mistake.subjectCode === filterSubject
+      && mistake.chapter === filterChapter
+      && (summaryScope === 'chapter' || mistake.section === filterSection));
+    if (!items.length) {
+      setSummaryError('当前范围还没有错题。');
+      return;
+    }
+    if (!companionStatus?.connected || !companionStatus.auth.connected) {
+      setSummaryError('请先在电脑上启动 408 AI 错题助手并登录 Codex。');
+      return;
+    }
+    setSummaryBusy(true);
+    setSummaryError('');
+    setSummaryResult(null);
+    try {
+      const subject = items[0].subject;
+      const section = summaryScope === 'section' ? filterSection : undefined;
+      const label = [subject, filterChapter, section].filter(Boolean).join(' · ');
+      setSummaryResult(await summarizeMistakesWithCodex({ subject, chapter: filterChapter, section, label }, items));
+    } catch (error) {
+      setSummaryError(`总结失败：${(error as Error).message}`);
+    } finally {
+      setSummaryBusy(false);
+    }
+  }
+
   async function prepareCodexQuestion() {
     if (!detailMistake) return;
     setCodexReadyId(detailMistake.id);
@@ -1368,9 +1457,9 @@ export default function Home() {
         </div>
       ) : (
         <section className="mistakes-view">
-          <div className="mistakes-heading"><div><span>我的错题</span><h2>{mistakes.length} 道错题，{pendingCount} 道待掌握</h2></div><div className="heading-actions"><input ref={backupInputRef} className="backup-input" type="file" accept="application/json,.json" onChange={importBackup} /><button className="backup-button" onClick={() => backupInputRef.current?.click()}>导入备份</button><button className="backup-button" disabled={!mistakes.length} onClick={exportBackup}>导出备份</button><button className="print-button" disabled={!filteredMistakes.length} onClick={printMistakes}>打印 / 保存为 PDF</button></div></div>
+          <div className="mistakes-heading"><div><span>我的错题</span><h2>{mistakes.length} 道错题，{pendingCount} 道待掌握</h2></div><div className="heading-actions"><input ref={backupInputRef} className="backup-input" type="file" accept="application/json,.json" onChange={importBackup} /><button className="summary-button" disabled={!mistakes.length} onClick={openSummary}>✦ AI 章节总结</button><button className="backup-button" onClick={() => backupInputRef.current?.click()}>导入备份</button><button className="backup-button" disabled={!mistakes.length} onClick={exportBackup}>导出备份</button><button className="print-button" disabled={!filteredMistakes.length} onClick={printMistakes}>打印 / 保存为 PDF</button></div></div>
           <div className="filterbar"><select value={filterSubject} onChange={(event) => { setFilterSubject(event.target.value); setFilterChapter('全部章节'); setFilterSection('全部小节'); }}><option>全部</option>{SUBJECTS.map((subject) => <option key={subject.code} value={subject.code}>{subject.name}</option>)}</select><select value={filterChapter} onChange={(event) => { setFilterChapter(event.target.value); setFilterSection('全部小节'); }}><option>全部章节</option>{mistakeChapterOptions.map((chapter) => <option key={chapter}>{chapter}</option>)}</select><select value={filterSection} onChange={(event) => setFilterSection(event.target.value)}><option>全部小节</option>{mistakeSectionOptions.map((section) => <option key={section}>{section}</option>)}</select><select value={filterStatus} onChange={(event) => setFilterStatus(event.target.value)}><option>全部状态</option><option>待掌握</option><option>已掌握</option></select><div className="mistake-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索章节、小节、页码或题目" /></div></div>
-          <div className="sync-note"><b>{companionStatus?.connected ? '双电脑自动同步已开启：' : '换电脑使用：'}</b>{companionStatus?.connected ? `错题、错因、笔记和 Codex 分析保存在 OneDrive；当前读取 ${companionStatus.libraryRoot}。` : '旧电脑点击“导出备份”，在新电脑打开同一个网站后点击“导入备份”。PDF 和错题不会公开上传。'}</div>
+          <div className="sync-note"><b>{companionStatus?.connected ? '双电脑自动同步已开启：' : '换电脑或手机使用：'}</b>{companionStatus?.connected ? `电脑间的错题、错因、笔记和 Codex 分析保存在 OneDrive；手机可打开在线网站查看，并用“导入备份”带入错题。当前读取 ${companionStatus.libraryRoot}。` : '在电脑点击“导出备份”，手机或新电脑打开同一个网站后点击“导入备份”。PDF 和错题不会公开上传。'}</div>
           {filteredMistakes.length ? <div className="mistake-chapter-list">{groupedMistakes.map((group) => <section className="mistake-chapter-group" key={`${group.subjectCode}:${group.chapter}`}><div className="mistake-chapter-heading"><div><span>{group.subjectCode}</span><h3>{group.subject} · {group.chapter}</h3></div><b>{group.items.length} 道</b></div><div className="mistake-grid">{group.items.map((mistake) => <article className={mistake.mastered ? 'mistake-card mastered' : 'mistake-card'} key={mistake.id}><button className="mistake-image" onClick={() => openMistakeDetail(mistake)} aria-label={`放大并编辑 ${displayQuestionNo(mistake.questionNo)}`}><MistakeImage image={mistake.image} alt={`${mistake.section} ${mistake.questionNo || ''}`} />{mistake.mastered && <span>已掌握</span>}<em>点击放大 · 编辑笔记</em></button><div className="mistake-body"><div className="mistake-tags"><span>{mistake.subjectCode}</span><span>{mistake.section.split(' ')[0]}</span><span>第{mistake.page}页</span></div><h3>{displayQuestionNo(mistake.questionNo)} · {mistake.reason}</h3><p className="mistake-path">{mistake.chapter} / {mistake.section}</p>{mistake.note && <p className="mistake-note">{mistake.note}</p>}<div className="mistake-actions"><button onClick={() => openMistakeDetail(mistake)}>放大 / 编辑</button><button onClick={() => toggleMastered(mistake)}>{mistake.mastered ? '标记为待复习' : '✓ 我已掌握'}</button><button className="delete-button" onClick={() => deleteMistake(mistake)}>删除</button></div></div></article>)}</div></section>)}</div> : <div className="mistakes-empty"><div>✓</div><h3>{mistakes.length ? '没有符合条件的错题' : '错题本还是空的'}</h3><p>{mistakes.length ? '换一个科目、章节或小节再看看。' : '返回练习册，点击题目右侧的“＋错题”即可加入。'}</p><button onClick={() => setView('reader')}>返回练习册</button></div>}
         </section>
       )}
@@ -1386,18 +1475,33 @@ export default function Home() {
         </section>
       </div>}
       {detailMistake && <div className="modal-backdrop mistake-detail-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !detailSaving && !codexBusy) setDetailMistake(null); }}>
-        <section className="mistake-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="mistake-detail-title">
+        <section className={`mistake-detail-dialog editor-${detailEditorSide} editor-${detailEditorSize}`} role="dialog" aria-modal="true" aria-labelledby="mistake-detail-title">
           <button className="dialog-close" onClick={() => setDetailMistake(null)} disabled={detailSaving || codexBusy} aria-label="关闭">×</button>
-          <div className="mistake-detail-image"><MistakeImage image={detailMistake.image} alt={`${detailMistake.section} ${detailMistake.questionNo || ''}`} /></div>
+          <div className="mistake-detail-image"><MistakeImage image={detailMistake.image} alt={`${detailMistake.section} ${detailMistake.questionNo || ''}`} /><div className="mistake-detail-nav"><button disabled={!detailNavigation.previous} onClick={() => navigateMistake(detailNavigation.previous)}>← 上一题</button><span>{detailNavigation.index + 1} / {detailNavigation.items.length}</span><button disabled={!detailNavigation.next} onClick={() => navigateMistake(detailNavigation.next)}>下一题 →</button></div></div>
           <div className="mistake-detail-editor">
             <span className="dialog-kicker">错题详情</span>
             <h2 id="mistake-detail-title">{displayQuestionNo(detailMistake.questionNo)}</h2>
             <p>{detailMistake.subject} · {detailMistake.chapter}<br />{detailMistake.section} · 第 {detailMistake.page} 页</p>
+            <div className="note-layout-tools"><button onClick={() => setDetailEditorSide((side) => side === 'right' ? 'left' : 'right')}>⇄ 笔记移到{detailEditorSide === 'right' ? '左边' : '右边'}</button><span>面板</span>{(['compact', 'normal', 'wide'] as const).map((size, index) => <button className={detailEditorSize === size ? 'active' : ''} key={size} onClick={() => setDetailEditorSize(size)}>{['窄', '标准', '宽'][index]}</button>)}<span>文字</span><button onClick={() => setDetailNoteScale((value) => Math.max(.8, Number((value - .1).toFixed(1))))}>A−</button><button onClick={() => setDetailNoteScale((value) => Math.min(1.6, Number((value + .1).toFixed(1))))}>A＋</button></div>
             <label>错误原因<select value={detailReason} onChange={(event) => setDetailReason(event.target.value)}><option value="">请选择</option>{REASONS.map((item) => <option key={item}>{item}</option>)}</select></label>
-            <label>我的笔记 <span>可随时修改或追加</span><textarea value={detailNote} onChange={(event) => setDetailNote(event.target.value)} placeholder="补充正确思路、易错点或复习记录…" /></label>
+            <label>我的笔记 <span>右下角也可自由拖动大小</span><textarea style={{ fontSize: `${detailNoteScale}rem` }} value={detailNote} onChange={(event) => setDetailNote(event.target.value)} placeholder="补充正确思路、易错点或复习记录…" /></label>
             {codexReadyId === detailMistake.id && <div className="codex-help"><b>{companionStatus?.connected ? (codexBusy ? 'Codex 正在分析这道题…' : codexAnalysis ? 'Codex 分析已完成' : '本地 Codex 已连接') : siteToolsSupported ? 'Codex 已能读取这道题' : '尚未连接本地 408 AI 助手'}</b><span>{companionStatus?.connected ? (codexBusy ? '正在读取题目图片并生成考点、错因和检查步骤，请稍候。' : codexAnalysis?.analysis || '点击“AI 分析”后会直接调用你的 Codex 订阅，不需要 API。') : siteToolsSupported ? '回到旁边的对话，粘贴或直接说“帮我分析当前错题”。' : '请从桌面启动“408 AI 错题助手”；没有本地助手时仍可复制提问。'}</span></div>}
             <div className="dialog-actions detail-actions"><button className="dialog-cancel" onClick={() => setDetailMistake(null)} disabled={detailSaving || codexBusy}>关闭</button><button className="codex-button" onClick={() => void prepareCodexQuestion()} disabled={detailSaving || codexBusy}>{codexBusy ? '分析中…' : companionStatus?.connected ? '✦ AI 分析' : '✦ 问 Codex'}</button><button className="dialog-connect" onClick={() => void saveMistakeDetail()} disabled={detailSaving || codexBusy}>{detailSaving ? '正在保存…' : '保存修改'}</button></div>
           </div>
+        </section>
+      </div>}
+      {summaryOpen && <div className="modal-backdrop summary-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !summaryBusy) setSummaryOpen(false); }}>
+        <section className="summary-dialog" role="dialog" aria-modal="true" aria-labelledby="summary-title">
+          <button className="dialog-close" onClick={() => setSummaryOpen(false)} disabled={summaryBusy} aria-label="关闭">×</button>
+          <span className="dialog-kicker">限定范围，避免内容过多</span>
+          <h2 id="summary-title">AI 错题总结</h2>
+          <p>{SUBJECTS.find((subject) => subject.code === filterSubject)?.name} · {filterChapter}{summaryScope === 'section' && filterSection !== '全部小节' ? ` · ${filterSection}` : ''}</p>
+          <div className="summary-scope"><button className={summaryScope === 'chapter' ? 'active' : ''} onClick={() => { setSummaryScope('chapter'); setSummaryResult(null); setSummaryError(''); }}>总结本章</button><button className={summaryScope === 'section' ? 'active' : ''} onClick={() => { setSummaryScope('section'); setSummaryResult(null); setSummaryError(''); }}>总结当前小节</button></div>
+          {!summaryResult && !summaryBusy && <div className="summary-ready"><b>{summaryScope === 'chapter' ? '会综合这一章的全部错题' : filterSection === '全部小节' ? '请先在错题本上方选一个具体小节' : '只综合当前小节的错题'}</b><span>总结包含重复错因、补弱优先级、复习安排和做题检查清单；此功能使用 Codex 额度。</span></div>}
+          {summaryBusy && <div className="summary-loading"><i />正在生成针对性的错题总结，请稍候…</div>}
+          {summaryError && <div className="summary-error">{summaryError}</div>}
+          {summaryResult && <div className="summary-result"><section><h3>掌握概况</h3><p>{summaryResult.overview}</p></section>{([['重复问题', summaryResult.patterns], ['优先补强', summaryResult.priorities], ['复习安排', summaryResult.reviewPlan], ['做题检查清单', summaryResult.checklist]] as const).map(([title, items]) => <section key={title}><h3>{title}</h3><ol>{items.map((item, index) => <li key={`${title}-${index}`}>{item}</li>)}</ol></section>)}</div>}
+          <div className="dialog-actions"><button className="dialog-cancel" onClick={() => setSummaryOpen(false)} disabled={summaryBusy}>关闭</button><button className="dialog-connect" onClick={() => void generateSummary()} disabled={summaryBusy || (summaryScope === 'section' && filterSection === '全部小节')}>{summaryBusy ? '总结中…' : summaryResult ? '重新生成' : '开始总结'}</button></div>
         </section>
       </div>}
       {githubDialogOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !githubConnecting) setGithubDialogOpen(false); }}>
