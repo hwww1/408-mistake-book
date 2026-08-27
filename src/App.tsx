@@ -512,7 +512,7 @@ export default function Home() {
   const detailDialogRef = useRef<HTMLElement>(null);
   const detailEditorRef = useRef<HTMLDivElement>(null);
   const panelDragRef = useRef<{ pointerId: number; startX: number; startY: number; panelX: number; panelY: number } | null>(null);
-  const panelResizeRef = useRef<{ pointerId: number; startX: number; startY: number; width: number; height: number } | null>(null);
+  const panelResizeCleanupRef = useRef<(() => void) | null>(null);
 
   const refreshMistakes = useCallback(async () => {
     setMistakes(await listMistakes());
@@ -1235,39 +1235,40 @@ export default function Home() {
   }
 
   function beginPanelResize(event: ReactPointerEvent<HTMLSpanElement>) {
-    const panel = detailEditorRef.current;
-    if (!panel) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    panelResizeRef.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      width: panel.offsetWidth,
-      height: panel.offsetHeight,
-    };
-  }
-
-  function resizePanel(event: ReactPointerEvent<HTMLSpanElement>) {
-    const resize = panelResizeRef.current;
     const dialog = detailDialogRef.current;
     const panel = detailEditorRef.current;
-    if (!resize || resize.pointerId !== event.pointerId || !dialog || !panel) return;
+    if (!dialog || !panel) return;
+    event.preventDefault();
+    event.stopPropagation();
+    panelResizeCleanupRef.current?.();
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startWidth = panel.offsetWidth;
+    const startHeight = panel.offsetHeight;
     const dialogRect = dialog.getBoundingClientRect();
     const panelRect = panel.getBoundingClientRect();
     const minWidth = Math.min(300, dialog.clientWidth - 12);
     const minHeight = Math.min(300, dialog.clientHeight - 12);
-    setDetailPanelSize({
-      width: Math.max(minWidth, Math.min(dialogRect.right - panelRect.left, resize.width + event.clientX - resize.startX)),
-      height: Math.max(minHeight, Math.min(dialogRect.bottom - panelRect.top, resize.height + event.clientY - resize.startY)),
-    });
-  }
-
-  function endPanelResize(event: ReactPointerEvent<HTMLSpanElement>) {
-    if (panelResizeRef.current?.pointerId !== event.pointerId) return;
-    panelResizeRef.current = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    const maxWidth = dialogRect.right - panelRect.left;
+    const maxHeight = dialogRect.bottom - panelRect.top;
+    const onMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      setDetailPanelSize({
+        width: Math.max(minWidth, Math.min(maxWidth, startWidth + moveEvent.clientX - startX)),
+        height: Math.max(minHeight, Math.min(maxHeight, startHeight + moveEvent.clientY - startY)),
+      });
+    };
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', cleanup);
+      window.removeEventListener('pointercancel', cleanup);
+      panelResizeCleanupRef.current = null;
+    };
+    panelResizeCleanupRef.current = cleanup;
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', cleanup);
+    window.addEventListener('pointercancel', cleanup);
   }
 
   function openSummary() {
@@ -1563,7 +1564,7 @@ export default function Home() {
             <p>{detailMistake.subject} · {detailMistake.chapter}<br />{detailMistake.section} · 第 {detailMistake.page} 页</p>
             <label>错误原因<select value={detailReason} onChange={(event) => setDetailReason(event.target.value)}><option value="">请选择</option>{REASONS.map((item) => <option key={item}>{item}</option>)}</select></label>
             <label>我的笔记 <span>拖动整个框的右下角可自由缩放</span><textarea value={detailNote} onChange={(event) => setDetailNote(event.target.value)} placeholder="补充正确思路、易错点或复习记录…" /></label>
-            <span className="panel-resize-hint" role="slider" aria-label="拖动调整笔记框大小" tabIndex={0} onPointerDown={beginPanelResize} onPointerMove={resizePanel} onPointerUp={endPanelResize} onPointerCancel={endPanelResize}>↘</span>
+            <span className="panel-resize-hint" role="slider" aria-label="拖动调整笔记框大小" tabIndex={0} onPointerDown={beginPanelResize}>↘</span>
             {codexReadyId === detailMistake.id && <div className="codex-help"><b>{companionStatus?.connected ? (codexBusy ? 'Codex 正在分析这道题…' : codexAnalysis ? 'Codex 分析已完成' : '本地 Codex 已连接') : siteToolsSupported ? 'Codex 已能读取这道题' : '尚未连接本地 408 AI 助手'}</b><span>{companionStatus?.connected ? (codexBusy ? '正在读取题目图片并生成考点、错因和检查步骤，请稍候。' : codexAnalysis?.analysis || '点击“AI 分析”后会直接调用你的 Codex 订阅，不需要 API。') : siteToolsSupported ? '回到旁边的对话，粘贴或直接说“帮我分析当前错题”。' : '请从桌面启动“408 AI 错题助手”；没有本地助手时仍可复制提问。'}</span></div>}
             <div className="dialog-actions detail-actions"><button className="dialog-cancel" onClick={() => setDetailMistake(null)} disabled={detailSaving || codexBusy}>关闭</button><button className="codex-button" onClick={() => void prepareCodexQuestion()} disabled={detailSaving || codexBusy}>{codexBusy ? '分析中…' : companionStatus?.connected ? '✦ AI 分析' : '✦ 问 Codex'}</button><button className="dialog-connect" onClick={() => void saveMistakeDetail()} disabled={detailSaving || codexBusy}>{detailSaving ? '正在保存…' : '保存修改'}</button></div>
           </div>
