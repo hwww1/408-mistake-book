@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["overview", "patterns", "priorities", "reviewPlan", "checklist"],
+  "properties": {
+    "overview": { "type": "string" },
+    "patterns": { "type": "array", "items": { "type": "string" } },
+    "priorities": { "type": "array", "items": { "type": "string" } },
+    "reviewPlan": { "type": "array", "items": { "type": "string" } },
+    "checklist": { "type": "array", "items": { "type": "string" } }
+  }
+}
