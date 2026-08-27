@@ -217,26 +217,23 @@ button:disabled { cursor: not-allowed; }
 .mistake-actions button { border: 0; border-radius: 8px; background: var(--green-soft); color: var(--green); padding: 8px 10px; font-size: 9px; font-weight: 800; }
 .mistake-actions .delete-button { background: transparent; color: #a06e6e; }
 .mistake-detail-backdrop { z-index: 110; }
-.mistake-detail-dialog { --editor-width: 380px; position: relative; width: min(1260px, 96vw); height: min(780px, calc(100vh - 44px)); display: grid; grid-template-columns: minmax(0, 1fr) var(--editor-width); overflow: hidden; border-radius: 20px; background: #fff; box-shadow: 0 24px 80px #06140e66; }
-.mistake-detail-dialog.editor-compact { --editor-width: 310px; }
-.mistake-detail-dialog.editor-wide { --editor-width: 520px; }
-.mistake-detail-dialog.editor-left { grid-template-columns: var(--editor-width) minmax(0, 1fr); }
-.mistake-detail-dialog.editor-left .mistake-detail-editor { order: 1; }
-.mistake-detail-dialog.editor-left .mistake-detail-image { order: 2; }
-.mistake-detail-image { position: relative; min-width: 0; min-height: 0; display: flex; align-items: center; justify-content: center; overflow: auto; background: #edf1ee; padding: 22px 22px 76px; }
+.mistake-detail-dialog { position: relative; width: min(1260px, 96vw); height: min(780px, calc(100vh - 44px)); overflow: hidden; border-radius: 20px; background: #edf1ee; box-shadow: 0 24px 80px #06140e66; }
+.mistake-detail-dialog > .dialog-close { z-index: 7; box-shadow: 0 3px 12px #172e2426; }
+.mistake-detail-image { position: absolute; inset: 0; min-width: 0; min-height: 0; display: flex; align-items: center; justify-content: center; overflow: auto; background: #edf1ee; padding: 22px 22px 76px; }
 .mistake-detail-image img { display: block; width: auto; max-width: 100%; height: auto; max-height: 100%; object-fit: contain; background: #fff; box-shadow: 0 8px 28px #172e241f; }
 .mistake-detail-image .image-loading { min-height: 260px; display: grid; place-items: center; }
 .mistake-detail-nav { position: absolute; z-index: 2; left: 50%; bottom: 18px; transform: translateX(-50%); display: flex; align-items: center; gap: 9px; padding: 7px; border-radius: 12px; background: #fffefb; box-shadow: 0 7px 24px #172e2433; white-space: nowrap; }
 .mistake-detail-nav button { border: 0; border-radius: 8px; background: var(--green-soft); color: var(--green); padding: 8px 11px; font-size: 10px; font-weight: 800; }
 .mistake-detail-nav button:disabled { opacity: .35; }
 .mistake-detail-nav span { min-width: 48px; color: #65736c; text-align: center; font-size: 10px; font-weight: 800; }
-.mistake-detail-editor { min-width: 0; overflow: auto; padding: 34px 28px 28px; }
+.mistake-detail-editor { position: absolute; z-index: 5; top: 22px; right: 22px; width: min(390px, calc(100% - 44px)); height: min(710px, calc(100% - 44px)); min-width: 300px; min-height: 380px; max-width: calc(100% - 22px); max-height: calc(100% - 22px); overflow: auto; resize: both; border: 1px solid #cddbd4; border-radius: 16px; background: #fff; padding: 52px 28px 28px; box-shadow: 0 16px 48px #132b2038; }
 .mistake-detail-editor h2 { margin: 7px 38px 8px 0; font-size: 21px; line-height: 1.35; }
-.mistake-detail-editor textarea { min-width: 180px; min-height: 230px; max-width: 100%; resize: both; }
-.note-layout-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 15px; padding: 8px; border: 1px solid #dce5e0; border-radius: 10px; background: #f8faf8; }
-.note-layout-tools span { margin-left: 5px; color: #839088; font-size: 9px; font-weight: 800; }
-.note-layout-tools button { border: 0; border-radius: 7px; background: #e9f1ed; color: #4e665b; padding: 6px 8px; font-size: 9px; font-weight: 800; }
-.note-layout-tools button.active { background: var(--green); color: #fff; }
+.mistake-detail-editor textarea { min-width: 180px; min-height: 210px; max-width: 100%; resize: vertical; }
+.note-window-handle { position: absolute; left: 0; right: 0; top: 0; height: 40px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid #dce5e0; border-radius: 16px 16px 0 0; background: #f3f7f5; padding: 0 12px 0 15px; color: #557066; cursor: grab; touch-action: none; user-select: none; }
+.note-window-handle:active { cursor: grabbing; }
+.note-window-handle span { font-size: 10px; font-weight: 900; letter-spacing: .02em; }
+.note-window-handle button { border: 0; border-radius: 7px; background: #e1ece7; color: var(--green); padding: 5px 8px; font-size: 9px; font-weight: 800; }
+.panel-resize-hint { position: sticky; float: right; right: -20px; bottom: -22px; color: var(--green); font-size: 19px; line-height: 1; pointer-events: none; }
 .codex-help { margin-top: 14px; border: 1px solid #c5dacf; border-radius: 10px; background: #eef7f2; padding: 11px 12px; color: #506e60; font-size: 10px; line-height: 1.55; }
 .codex-help b, .codex-help span { display: block; }
 .codex-help b { margin-bottom: 3px; color: var(--green); font-size: 11px; }
@@ -316,13 +313,10 @@ button:disabled { cursor: not-allowed; }
   .mistake-grid { grid-template-columns: 1fr; }
   .github-dialog { padding: 25px 20px; }
   .question-add-dialog { padding: 25px 20px; }
-  .mistake-detail-dialog, .mistake-detail-dialog.editor-left { width: min(700px, 96vw); height: min(880px, calc(100vh - 24px)); grid-template-columns: 1fr; grid-template-rows: minmax(240px, 46%) minmax(0, 54%); }
-  .mistake-detail-dialog.editor-left .mistake-detail-image { order: 1; }
-  .mistake-detail-dialog.editor-left .mistake-detail-editor { order: 2; }
-  .mistake-detail-image { padding: 12px; }
-  .mistake-detail-editor { padding: 24px 20px; }
+  .mistake-detail-dialog { width: min(700px, 96vw); height: min(880px, calc(100vh - 24px)); }
+  .mistake-detail-image { padding: 12px 12px 72px; }
+  .mistake-detail-editor { top: auto; right: 12px; bottom: 12px; width: calc(100% - 24px); height: min(54%, 450px); min-width: 260px; min-height: 300px; max-width: calc(100% - 12px); max-height: calc(100% - 12px); padding: 51px 20px 22px; }
   .mistake-detail-editor textarea { min-height: 135px; }
-  .note-layout-tools > button:first-child { flex-basis: 100%; }
   .summary-dialog { padding: 26px 19px; }
   .dialog-actions { flex-direction: column-reverse; }
   .dialog-actions button { width: 100%; }
