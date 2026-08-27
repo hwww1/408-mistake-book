@@ -19,12 +19,6 @@ export type CompanionStatus = {
 
 export type CompanionPdf = { name: string; path: string; size: number };
 
-export type CodexAnalysis = {
-  analysis: string;
-  noteToAppend: string;
-  suggestedReason?: string;
-};
-
 type SerializedMistake = Omit<Mistake, 'image'> & { imageDataUrl: string };
 type DeletedMistakes = Record<string, string>;
 type SyncSnapshot = {
@@ -172,23 +166,4 @@ export async function deleteMistakeSynced(id: string): Promise<void> {
   deleted[id] = new Date().toISOString();
   await setSetting(DELETED_KEY, deleted);
   try { await syncMistakesWithCompanion(); } catch { /* Tombstone syncs next time. */ }
-}
-
-export async function analyzeMistakeWithCodex(mistake: Mistake): Promise<CodexAnalysis> {
-  return fetchJson<CodexAnalysis>('/analyze', {
-    method: 'POST',
-    body: JSON.stringify({
-      mistake: {
-        id: mistake.id,
-        subject: mistake.subject,
-        chapter: mistake.chapter,
-        section: mistake.section,
-        page: mistake.page,
-        questionNo: mistake.questionNo,
-        reason: mistake.reason,
-        note: mistake.note,
-      },
-      imageDataUrl: await blobToDataUrl(mistake.image),
-    }),
-  }, 12 * 60 * 1000);
 }
