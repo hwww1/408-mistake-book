@@ -25,6 +25,14 @@ export type CodexAnalysis = {
   suggestedReason?: string;
 };
 
+export type CodexSummary = {
+  overview: string;
+  patterns: string[];
+  priorities: string[];
+  reviewPlan: string[];
+  checklist: string[];
+};
+
 type SerializedMistake = Omit<Mistake, 'image'> & { imageDataUrl: string };
 type DeletedMistakes = Record<string, string>;
 type SyncSnapshot = {
@@ -189,6 +197,29 @@ export async function analyzeMistakeWithCodex(mistake: Mistake): Promise<CodexAn
         note: mistake.note,
       },
       imageDataUrl: await blobToDataUrl(mistake.image),
+    }),
+  }, 12 * 60 * 1000);
+}
+
+export async function summarizeMistakesWithCodex(
+  scope: { subject: string; chapter: string; section?: string; label: string },
+  mistakes: Mistake[],
+): Promise<CodexSummary> {
+  return fetchJson<CodexSummary>('/summarize', {
+    method: 'POST',
+    body: JSON.stringify({
+      scope,
+      mistakes: mistakes.map((mistake) => ({
+        id: mistake.id,
+        subject: mistake.subject,
+        chapter: mistake.chapter,
+        section: mistake.section,
+        page: mistake.page,
+        questionNo: mistake.questionNo,
+        reason: mistake.reason,
+        note: mistake.note,
+        mastered: mistake.mastered,
+      })),
     }),
   }, 12 * 60 * 1000);
 }
