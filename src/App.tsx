@@ -472,9 +472,7 @@ export default function Home() {
   const [detailReason, setDetailReason] = useState('');
   const [detailNote, setDetailNote] = useState('');
   const [detailSaving, setDetailSaving] = useState(false);
-  const [detailEditorSide, setDetailEditorSide] = useState<'left' | 'right'>('right');
-  const [detailEditorSize, setDetailEditorSize] = useState<'compact' | 'normal' | 'wide'>('normal');
-  const [detailNoteScale, setDetailNoteScale] = useState(1);
+  const [detailPanelPosition, setDetailPanelPosition] = useState<{ x: number; y: number } | null>(null);
   const [codexReadyId, setCodexReadyId] = useState('');
   const [codexBusy, setCodexBusy] = useState(false);
   const [codexAnalysis, setCodexAnalysis] = useState<CodexAnalysis | null>(null);
@@ -510,6 +508,9 @@ export default function Home() {
   const mistakesRef = useRef<Mistake[]>([]);
   const detailMistakeRef = useRef<Mistake | null>(null);
   const detailDraftRef = useRef({ reason: '', note: '' });
+  const detailDialogRef = useRef<HTMLElement>(null);
+  const detailEditorRef = useRef<HTMLDivElement>(null);
+  const panelDragRef = useRef<{ pointerId: number; startX: number; startY: number; panelX: number; panelY: number } | null>(null);
 
   const refreshMistakes = useCallback(async () => {
     setMistakes(await listMistakes());
@@ -1192,6 +1193,48 @@ export default function Home() {
     openMistakeDetail(mistake);
   }
 
+  function beginPanelDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if ((event.target as HTMLElement).closest('button')) return;
+    const dialog = detailDialogRef.current?.getBoundingClientRect();
+    const panel = detailEditorRef.current?.getBoundingClientRect();
+    if (!dialog || !panel) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    panelDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      panelX: panel.left - dialog.left,
+      panelY: panel.top - dialog.top,
+    };
+  }
+
+  function movePanel(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = panelDragRef.current;
+    const dialog = detailDialogRef.current;
+    const panel = detailEditorRef.current;
+    if (!drag || drag.pointerId !== event.pointerId || !dialog || !panel) return;
+    const maxX = Math.max(0, dialog.clientWidth - panel.offsetWidth);
+    const maxY = Math.max(0, dialog.clientHeight - panel.offsetHeight);
+    setDetailPanelPosition({
+      x: Math.max(0, Math.min(maxX, drag.panelX + event.clientX - drag.startX)),
+      y: Math.max(0, Math.min(maxY, drag.panelY + event.clientY - drag.startY)),
+    });
+  }
+
+  function endPanelDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (panelDragRef.current?.pointerId !== event.pointerId) return;
+    panelDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+
+  function resetDetailPanel() {
+    setDetailPanelPosition(null);
+    if (detailEditorRef.current) {
+      detailEditorRef.current.style.width = '';
+      detailEditorRef.current.style.height = '';
+    }
+  }
+
   function openSummary() {
     if (filterSubject === '全部' || filterChapter === '全部章节') {
       setToast('请先选择一个科目和章节，再生成 AI 总结');
@@ -1475,16 +1518,17 @@ export default function Home() {
         </section>
       </div>}
       {detailMistake && <div className="modal-backdrop mistake-detail-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !detailSaving && !codexBusy) setDetailMistake(null); }}>
-        <section className={`mistake-detail-dialog editor-${detailEditorSide} editor-${detailEditorSize}`} role="dialog" aria-modal="true" aria-labelledby="mistake-detail-title">
+        <section ref={detailDialogRef} className="mistake-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="mistake-detail-title">
           <button className="dialog-close" onClick={() => setDetailMistake(null)} disabled={detailSaving || codexBusy} aria-label="关闭">×</button>
           <div className="mistake-detail-image"><MistakeImage image={detailMistake.image} alt={`${detailMistake.section} ${detailMistake.questionNo || ''}`} /><div className="mistake-detail-nav"><button disabled={!detailNavigation.previous} onClick={() => navigateMistake(detailNavigation.previous)}>← 上一题</button><span>{detailNavigation.index + 1} / {detailNavigation.items.length}</span><button disabled={!detailNavigation.next} onClick={() => navigateMistake(detailNavigation.next)}>下一题 →</button></div></div>
-          <div className="mistake-detail-editor">
+          <div ref={detailEditorRef} className="mistake-detail-editor" style={detailPanelPosition ? { left: detailPanelPosition.x, top: detailPanelPosition.y, right: 'auto' } : undefined}>
+            <div className="note-window-handle" onPointerDown={beginPanelDrag} onPointerMove={movePanel} onPointerUp={endPanelDrag} onPointerCancel={endPanelDrag}><span>⠿ 按住这里移动笔记框</span><button type="button" onClick={resetDetailPanel}>恢复默认</button></div>
             <span className="dialog-kicker">错题详情</span>
             <h2 id="mistake-detail-title">{displayQuestionNo(detailMistake.questionNo)}</h2>
             <p>{detailMistake.subject} · {detailMistake.chapter}<br />{detailMistake.section} · 第 {detailMistake.page} 页</p>
-            <div className="note-layout-tools"><button onClick={() => setDetailEditorSide((side) => side === 'right' ? 'left' : 'right')}>⇄ 笔记移到{detailEditorSide === 'right' ? '左边' : '右边'}</button><span>面板</span>{(['compact', 'normal', 'wide'] as const).map((size, index) => <button className={detailEditorSize === size ? 'active' : ''} key={size} onClick={() => setDetailEditorSize(size)}>{['窄', '标准', '宽'][index]}</button>)}<span>文字</span><button onClick={() => setDetailNoteScale((value) => Math.max(.8, Number((value - .1).toFixed(1))))}>A−</button><button onClick={() => setDetailNoteScale((value) => Math.min(1.6, Number((value + .1).toFixed(1))))}>A＋</button></div>
             <label>错误原因<select value={detailReason} onChange={(event) => setDetailReason(event.target.value)}><option value="">请选择</option>{REASONS.map((item) => <option key={item}>{item}</option>)}</select></label>
-            <label>我的笔记 <span>右下角也可自由拖动大小</span><textarea style={{ fontSize: `${detailNoteScale}rem` }} value={detailNote} onChange={(event) => setDetailNote(event.target.value)} placeholder="补充正确思路、易错点或复习记录…" /></label>
+            <label>我的笔记 <span>拖动整个框的右下角可自由缩放</span><textarea value={detailNote} onChange={(event) => setDetailNote(event.target.value)} placeholder="补充正确思路、易错点或复习记录…" /></label>
+            <span className="panel-resize-hint" aria-hidden="true">↘</span>
             {codexReadyId === detailMistake.id && <div className="codex-help"><b>{companionStatus?.connected ? (codexBusy ? 'Codex 正在分析这道题…' : codexAnalysis ? 'Codex 分析已完成' : '本地 Codex 已连接') : siteToolsSupported ? 'Codex 已能读取这道题' : '尚未连接本地 408 AI 助手'}</b><span>{companionStatus?.connected ? (codexBusy ? '正在读取题目图片并生成考点、错因和检查步骤，请稍候。' : codexAnalysis?.analysis || '点击“AI 分析”后会直接调用你的 Codex 订阅，不需要 API。') : siteToolsSupported ? '回到旁边的对话，粘贴或直接说“帮我分析当前错题”。' : '请从桌面启动“408 AI 错题助手”；没有本地助手时仍可复制提问。'}</span></div>}
             <div className="dialog-actions detail-actions"><button className="dialog-cancel" onClick={() => setDetailMistake(null)} disabled={detailSaving || codexBusy}>关闭</button><button className="codex-button" onClick={() => void prepareCodexQuestion()} disabled={detailSaving || codexBusy}>{codexBusy ? '分析中…' : companionStatus?.connected ? '✦ AI 分析' : '✦ 问 Codex'}</button><button className="dialog-connect" onClick={() => void saveMistakeDetail()} disabled={detailSaving || codexBusy}>{detailSaving ? '正在保存…' : '保存修改'}</button></div>
           </div>
