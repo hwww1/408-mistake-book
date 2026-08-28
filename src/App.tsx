@@ -471,6 +471,7 @@ export default function Home() {
   const [detailMistake, setDetailMistake] = useState<Mistake | null>(null);
   const [detailReason, setDetailReason] = useState('');
   const [detailNote, setDetailNote] = useState('');
+  const [detailNoteExpanded, setDetailNoteExpanded] = useState(false);
   const [detailSaving, setDetailSaving] = useState(false);
   const [detailPanelPosition, setDetailPanelPosition] = useState<{ x: number; y: number } | null>(null);
   const [detailPanelSize, setDetailPanelSize] = useState<{ width: number; height: number } | null>(null);
@@ -1095,17 +1096,14 @@ export default function Home() {
     }
   }
 
-  async function saveCanvasRegion(
-    source: Rect,
-    details: { id?: string; questionNo: string; reason: string; note: string },
-  ) {
+  async function captureCanvasRegion(source: Rect) {
     const canvas = canvasRef.current;
-    if (!canvas || !selectedEntry) return false;
+    if (!canvas) return null;
     const crop = document.createElement('canvas');
     crop.width = Math.max(1, Math.round(source.width));
     crop.height = Math.max(1, Math.round(source.height));
     const context = crop.getContext('2d');
-    if (!context) return false;
+    if (!context) return null;
     context.fillStyle = '#fff';
     context.fillRect(0, 0, crop.width, crop.height);
     context.drawImage(
@@ -1113,7 +1111,15 @@ export default function Home() {
       Math.round(source.x), Math.round(source.y), crop.width, crop.height,
       0, 0, crop.width, crop.height,
     );
-    const image = await new Promise<Blob | null>((resolve) => crop.toBlob(resolve, 'image/png'));
+    return new Promise<Blob | null>((resolve) => crop.toBlob(resolve, 'image/png'));
+  }
+
+  async function saveCanvasRegion(
+    source: Rect,
+    details: { id?: string; questionNo: string; reason: string; note: string },
+  ) {
+    if (!selectedEntry) return false;
+    const image = await captureCanvasRegion(source);
     if (!image) return false;
     const mistake: Mistake = {
       id: details.id || crypto.randomUUID(), createdAt: new Date().toISOString(),
@@ -1125,6 +1131,32 @@ export default function Home() {
     await saveMistakeSynced(mistake);
     await refreshMistakes();
     return true;
+  }
+
+  async function copySelectionImage() {
+    const canvas = canvasRef.current;
+    if (!canvas || !selection) return;
+    const bounds = canvas.getBoundingClientRect();
+    const image = await captureCanvasRegion({
+      x: selection.x * canvas.width / bounds.width,
+      y: selection.y * canvas.height / bounds.height,
+      width: selection.width * canvas.width / bounds.width,
+      height: selection.height * canvas.height / bounds.height,
+    });
+    if (!image) return;
+    try {
+      if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') throw new Error('clipboard-image-not-supported');
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': image })]);
+      setToast('框选题目已复制为图片，可以直接粘贴');
+    } catch {
+      const url = URL.createObjectURL(image);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${selectedEntry?.subjectCode || '408'}-${selectedEntry?.section.split(' ')[0] || '题目'}-第${pageNumber}页.png`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setToast('浏览器未允许复制图片，已改为下载 PNG');
+    }
   }
 
   async function addMistake() {
@@ -1186,6 +1218,7 @@ export default function Home() {
     setDetailMistake(mistake);
     setDetailReason(mistake.reason === '未填写' ? '' : mistake.reason);
     setDetailNote(mistake.note || '');
+    setDetailNoteExpanded(false);
     setCodexReadyId('');
     setCodexAnalysis(null);
   }
@@ -1337,6 +1370,7 @@ export default function Home() {
         setDetailMistake(saved);
         setDetailReason(saved.reason === '未填写' ? '' : saved.reason);
         setDetailNote(saved.note);
+        setDetailNoteExpanded(true);
         setCodexAnalysis(result);
         await refreshMistakes();
         setToast('Codex 分析完成，精炼结论已加入笔记并同步');
@@ -1425,6 +1459,32 @@ export default function Home() {
     setToast('备份已导出，可带到另一台电脑');
   }
 
+  async function exportMobileMistakeBook() {
+    if (!orderedMistakes.length) return;
+    setToast('正在生成手机错题册…');
+    const chapterKeys = [...new Map(orderedMistakes.map((mistake) => [
+      `${mistake.subjectCode}:${mistake.chapter}`,
+      { id: `chapter-${mistake.subjectCode}-${mistake.chapter.replace(/\D+/g, '') || 'x'}`, label: `${mistake.subject} · ${mistake.chapter}` },
+    ])).values()];
+    const cards = await Promise.all(orderedMistakes.map(async (mistake, index) => {
+      const image = await blobToDataUrl(mistake.image);
+      const chapterId = `chapter-${mistake.subjectCode}-${mistake.chapter.replace(/\D+/g, '') || 'x'}`;
+      const previousKey = index > 0 ? `${orderedMistakes[index - 1].subjectCode}:${orderedMistakes[index - 1].chapter}` : '';
+      const currentKey = `${mistake.subjectCode}:${mistake.chapter}`;
+      const heading = currentKey !== previousKey ? `<h2 id="${chapterId}">${escapeHtml(mistake.subject)} · ${escapeHtml(mistake.chapter)}</h2>` : '';
+      return `${heading}<article data-search="${escapeHtml(`${mistake.subject} ${mistake.chapter} ${mistake.section} ${mistake.questionNo} ${mistake.reason} ${mistake.note}`.toLowerCase())}"><header><b>${escapeHtml(displayQuestionNo(mistake.questionNo))}</b><span>${escapeHtml(mistake.section)} · 第${mistake.page}页</span></header><img src="${image}" alt="${escapeHtml(displayQuestionNo(mistake.questionNo))}"><div class="meta"><span>${escapeHtml(mistake.subjectCode)}</span><span>${escapeHtml(mistake.reason)}</span><span>${mistake.mastered ? '已掌握' : '待复习'}</span></div>${mistake.note ? `<details><summary>我的笔记 · 点击展开</summary><p>${escapeHtml(mistake.note)}</p></details>` : '<p class="empty-note">暂无笔记</p>'}</article>`;
+    }));
+    const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>408 手机错题册</title><style>*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:#f2f5f3;color:#213129;font-family:-apple-system,BlinkMacSystemFont,"Microsoft YaHei",sans-serif}main{max-width:760px;margin:auto;padding:18px 14px 60px}.hero{position:sticky;z-index:5;top:0;margin:-18px -14px 20px;padding:18px 14px 13px;background:#f2f5f3eF;backdrop-filter:blur(12px);border-bottom:1px solid #d8e2dd}.hero h1{margin:0;font-size:23px}.hero p{margin:5px 0 12px;color:#6d7b74;font-size:12px}.hero input{width:100%;border:1px solid #cad8d0;border-radius:11px;background:white;padding:11px 13px;font-size:14px;outline:none}nav{display:flex;gap:7px;overflow:auto;margin-bottom:24px;padding-bottom:4px}nav a{flex:none;border-radius:99px;background:#e2eee8;color:#237252;padding:7px 10px;text-decoration:none;font-size:11px;font-weight:700}h2{margin:28px 2px 10px;font-size:17px;color:#226c50}article{margin-bottom:14px;overflow:hidden;border:1px solid #d9e3de;border-radius:14px;background:#fff;box-shadow:0 5px 18px #1533260c}article header{display:flex;justify-content:space-between;gap:10px;padding:13px 14px 10px}header b{font-size:14px}header span{color:#78867f;font-size:10px;text-align:right}article img{display:block;width:100%;max-height:520px;object-fit:contain;border-top:1px solid #edf1ef;border-bottom:1px solid #edf1ef;background:#fff}.meta{display:flex;gap:6px;padding:11px 14px}.meta span{border-radius:7px;background:#edf4f0;color:#41715c;padding:5px 8px;font-size:10px;font-weight:700}details{margin:0 14px 14px;border-radius:10px;background:#f4f7f5;padding:10px 12px}summary{color:#267353;font-size:12px;font-weight:800;cursor:pointer}details p{margin:9px 0 0;color:#46574e;font-size:13px;line-height:1.75;white-space:pre-wrap}.empty-note{margin:0 14px 14px;color:#9aa49f;font-size:11px}.empty{display:none;padding:50px 20px;text-align:center;color:#7a8780}@media(min-width:700px){main{padding-top:28px}.hero{margin-top:-28px;padding-top:28px}}</style></head><body><main><div class="hero"><h1>408 手机错题册</h1><p>${orderedMistakes.length} 道错题 · ${new Date().toLocaleDateString('zh-CN')} 导出 · 完全离线</p><input id="search" placeholder="搜索章节、题号、错因或笔记"></div><nav>${chapterKeys.map((chapter) => `<a href="#${chapter.id}">${escapeHtml(chapter.label)}</a>`).join('')}</nav><div id="cards">${cards.join('')}</div><div id="empty" class="empty">没有找到对应错题</div></main><script>const q=document.getElementById('search'),e=document.getElementById('empty');q.addEventListener('input',()=>{const s=q.value.trim().toLowerCase();let n=0;document.querySelectorAll('article').forEach(x=>{const show=!s||x.dataset.search.includes(s);x.style.display=show?'':'none';if(show)n++});e.style.display=n?'none':'block'});</script></body></html>`;
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `408手机错题册-${new Date().toISOString().slice(0, 10)}.html`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setToast('手机错题册已导出，传到手机即可离线查看');
+  }
+
   async function importBackup(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = '';
@@ -1510,7 +1570,7 @@ export default function Home() {
                   const alreadyAdded = mistakes.some((mistake) => mistake.id === `auto:${selectedEntry.id}:${pageNumber}:${region.index}`);
                   return <div className="question-region" key={`${pageNumber}:${region.index}`} style={{ left: `${region.x / (canvasRef.current?.width || 1) * 100}%`, top: `${region.y / (canvasRef.current?.height || 1) * 100}%`, width: `${region.width / (canvasRef.current?.width || 1) * 100}%`, height: `${region.height / (canvasRef.current?.height || 1) * 100}%` }}><span>本页第 {region.index + 1} 题</span><button className={alreadyAdded ? 'added' : ''} disabled={addingQuestionIndex !== null} onPointerDown={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); openDetectedQuestionDialog(region); }}>{addingQuestionIndex === region.index ? '添加中…' : alreadyAdded ? '✓ 查看' : '＋ 错题'}</button></div>;
                 })}
-                {activeRect && <div className={`selection-box ${selection ? 'done' : ''}`} style={{ left: activeRect.x, top: activeRect.y, width: activeRect.width, height: activeRect.height }}><span>{selection ? '已框选' : '松开完成'}</span></div>}
+                {activeRect && <div className={`selection-box ${selection ? 'done' : ''}`} style={{ left: activeRect.x, top: activeRect.y, width: activeRect.width, height: activeRect.height }}><span>{selection ? '已框选 · 可复制' : '松开完成'}</span></div>}
                 {readerMessage && <div className={readerError ? 'reader-message error' : 'reader-message'}><i /><span>{readerMessage}</span>{readerError && <button onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); setLoadAttempt((value) => value + 1); }}>重新打开</button>}</div>}
               </div>}
             </div>
@@ -1530,16 +1590,16 @@ export default function Home() {
             <label>错误原因 <span>选填</span><select value={reason} onChange={(event) => setReason(event.target.value)}><option value="">请选择</option>{REASONS.map((item) => <option key={item}>{item}</option>)}</select></label>
             <label>我的笔记 <span>选填</span><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="写下正确思路或易错点…" /></label>
             <div className="auto-tags">{selectedEntry && <><span>{selectedEntry.subjectCode}</span><span>{selectedEntry.section.split(' ')[0]}</span><span>第 {pageNumber} 页</span></>}</div>
-            <button className="primary-button" disabled={!selection} onClick={addMistake}>＋ 加入错题本</button>
-            <p className="capture-tip">保存后可按科目、章节和掌握状态筛选，并打印或另存为 PDF。</p>
+            <div className="capture-action-row"><button className="copy-image-button" disabled={!selection} onClick={() => void copySelectionImage()}>▣ 复制图片</button><button className="primary-button" disabled={!selection} onClick={addMistake}>＋ 加入错题本</button></div>
+            <p className="capture-tip">复制后可直接粘贴到微信、Word 或 ChatGPT；保存后可按章节筛选。</p>
           </aside>
         </div>
       ) : (
         <section className="mistakes-view">
-          <div className="mistakes-heading"><div><span>我的错题</span><h2>{mistakes.length} 道错题，{pendingCount} 道待掌握</h2></div><div className="heading-actions"><input ref={backupInputRef} className="backup-input" type="file" accept="application/json,.json" onChange={importBackup} /><button className="summary-button" disabled={!mistakes.length} onClick={openSummary}>✦ AI 章节总结</button><button className="backup-button" onClick={() => backupInputRef.current?.click()}>导入备份</button><button className="backup-button" disabled={!mistakes.length} onClick={exportBackup}>导出备份</button><button className="print-button" disabled={!filteredMistakes.length} onClick={printMistakes}>打印 / 保存为 PDF</button></div></div>
+          <div className="mistakes-heading"><div><span>我的错题</span><h2>{mistakes.length} 道错题，{pendingCount} 道待掌握</h2></div><div className="heading-actions"><input ref={backupInputRef} className="backup-input" type="file" accept="application/json,.json" onChange={importBackup} /><button className="summary-button" disabled={!mistakes.length} onClick={openSummary}>✦ AI 章节总结</button><button className="mobile-export-button" disabled={!mistakes.length} onClick={() => void exportMobileMistakeBook()}>手机离线错题册</button><button className="backup-button" onClick={() => backupInputRef.current?.click()}>导入备份</button><button className="backup-button" disabled={!mistakes.length} onClick={exportBackup}>导出备份</button><button className="print-button" disabled={!filteredMistakes.length} onClick={printMistakes}>打印 / 保存为 PDF</button></div></div>
           <div className="filterbar"><select value={filterSubject} onChange={(event) => { setFilterSubject(event.target.value); setFilterChapter('全部章节'); setFilterSection('全部小节'); }}><option>全部</option>{SUBJECTS.map((subject) => <option key={subject.code} value={subject.code}>{subject.name}</option>)}</select><select value={filterChapter} onChange={(event) => { setFilterChapter(event.target.value); setFilterSection('全部小节'); }}><option>全部章节</option>{mistakeChapterOptions.map((chapter) => <option key={chapter}>{chapter}</option>)}</select><select value={filterSection} onChange={(event) => setFilterSection(event.target.value)}><option>全部小节</option>{mistakeSectionOptions.map((section) => <option key={section}>{section}</option>)}</select><select value={filterStatus} onChange={(event) => setFilterStatus(event.target.value)}><option>全部状态</option><option>待掌握</option><option>已掌握</option></select><div className="mistake-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索章节、小节、页码或题目" /></div></div>
           <div className="sync-note"><b>{companionStatus?.connected ? '双电脑自动同步已开启：' : '换电脑或手机使用：'}</b>{companionStatus?.connected ? `电脑间的错题、错因、笔记和 Codex 分析保存在 OneDrive；手机可打开在线网站查看，并用“导入备份”带入错题。当前读取 ${companionStatus.libraryRoot}。` : '在电脑点击“导出备份”，手机或新电脑打开同一个网站后点击“导入备份”。PDF 和错题不会公开上传。'}</div>
-          {filteredMistakes.length ? <div className="mistake-chapter-list">{groupedMistakes.map((group) => <section className="mistake-chapter-group" key={`${group.subjectCode}:${group.chapter}`}><div className="mistake-chapter-heading"><div><span>{group.subjectCode}</span><h3>{group.subject} · {group.chapter}</h3></div><b>{group.items.length} 道</b></div><div className="mistake-grid">{group.items.map((mistake) => <article className={mistake.mastered ? 'mistake-card mastered' : 'mistake-card'} key={mistake.id}><button className="mistake-image" onClick={() => openMistakeDetail(mistake)} aria-label={`放大并编辑 ${displayQuestionNo(mistake.questionNo)}`}><MistakeImage image={mistake.image} alt={`${mistake.section} ${mistake.questionNo || ''}`} />{mistake.mastered && <span>已掌握</span>}<em>点击放大 · 编辑笔记</em></button><div className="mistake-body"><div className="mistake-tags"><span>{mistake.subjectCode}</span><span>{mistake.section.split(' ')[0]}</span><span>第{mistake.page}页</span></div><h3>{displayQuestionNo(mistake.questionNo)} · {mistake.reason}</h3><p className="mistake-path">{mistake.chapter} / {mistake.section}</p>{mistake.note && <p className="mistake-note">{mistake.note}</p>}<div className="mistake-actions"><button onClick={() => openMistakeDetail(mistake)}>放大 / 编辑</button><button onClick={() => toggleMastered(mistake)}>{mistake.mastered ? '标记为待复习' : '✓ 我已掌握'}</button><button className="delete-button" onClick={() => deleteMistake(mistake)}>删除</button></div></div></article>)}</div></section>)}</div> : <div className="mistakes-empty"><div>✓</div><h3>{mistakes.length ? '没有符合条件的错题' : '错题本还是空的'}</h3><p>{mistakes.length ? '换一个科目、章节或小节再看看。' : '返回练习册，点击题目右侧的“＋错题”即可加入。'}</p><button onClick={() => setView('reader')}>返回练习册</button></div>}
+          {filteredMistakes.length ? <div className="mistake-chapter-list">{groupedMistakes.map((group) => <section className="mistake-chapter-group" key={`${group.subjectCode}:${group.chapter}`}><div className="mistake-chapter-heading"><div><span>{group.subjectCode}</span><h3>{group.subject} · {group.chapter}</h3></div><b>{group.items.length} 道</b></div><div className="mistake-grid">{group.items.map((mistake) => <article className={mistake.mastered ? 'mistake-card mastered' : 'mistake-card'} key={mistake.id}><button className="mistake-image" onClick={() => openMistakeDetail(mistake)} aria-label={`放大并编辑 ${displayQuestionNo(mistake.questionNo)}`}><MistakeImage image={mistake.image} alt={`${mistake.section} ${mistake.questionNo || ''}`} />{mistake.mastered && <span>已掌握</span>}<em>点击放大 · 编辑笔记</em></button><div className="mistake-body"><div className="mistake-tags"><span>{mistake.subjectCode}</span><span>{mistake.section.split(' ')[0]}</span><span>第{mistake.page}页</span></div><h3>{displayQuestionNo(mistake.questionNo)} · {mistake.reason}</h3><p className="mistake-path">{mistake.chapter} / {mistake.section}</p>{mistake.note && <details className="mistake-note-details"><summary>我的笔记 · 点击展开</summary><p className="mistake-note">{mistake.note}</p></details>}<div className="mistake-actions"><button onClick={() => openMistakeDetail(mistake)}>放大 / 编辑</button><button onClick={() => toggleMastered(mistake)}>{mistake.mastered ? '标记为待复习' : '✓ 我已掌握'}</button><button className="delete-button" onClick={() => deleteMistake(mistake)}>删除</button></div></div></article>)}</div></section>)}</div> : <div className="mistakes-empty"><div>✓</div><h3>{mistakes.length ? '没有符合条件的错题' : '错题本还是空的'}</h3><p>{mistakes.length ? '换一个科目、章节或小节再看看。' : '返回练习册，点击题目右侧的“＋错题”即可加入。'}</p><button onClick={() => setView('reader')}>返回练习册</button></div>}
         </section>
       )}
       {pendingQuestionRegion && selectedEntry && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && addingQuestionIndex === null) setPendingQuestionRegion(null); }}>
@@ -1563,7 +1623,8 @@ export default function Home() {
             <h2 id="mistake-detail-title">{displayQuestionNo(detailMistake.questionNo)}</h2>
             <p>{detailMistake.subject} · {detailMistake.chapter}<br />{detailMistake.section} · 第 {detailMistake.page} 页</p>
             <label>错误原因<select value={detailReason} onChange={(event) => setDetailReason(event.target.value)}><option value="">请选择</option>{REASONS.map((item) => <option key={item}>{item}</option>)}</select></label>
-            <label>我的笔记 <span>拖动整个框的右下角可自由缩放</span><textarea value={detailNote} onChange={(event) => setDetailNote(event.target.value)} placeholder="补充正确思路、易错点或复习记录…" /></label>
+            <div className="detail-note-heading"><b>我的笔记</b><button type="button" onClick={() => setDetailNoteExpanded((expanded) => !expanded)}>{detailNoteExpanded ? '收起笔记' : '展开笔记'}</button></div>
+            {detailNoteExpanded ? <label className="detail-note-field"><span>拖动整个框的右下角可自由缩放</span><textarea value={detailNote} onChange={(event) => setDetailNote(event.target.value)} placeholder="补充正确思路、易错点或复习记录…" /></label> : <button type="button" className="detail-note-preview" onClick={() => setDetailNoteExpanded(true)}>{detailNote ? `${detailNote.slice(0, 70)}${detailNote.length > 70 ? '…' : ''}` : '暂无笔记，点击展开后添加'}</button>}
             <span className="panel-resize-hint" role="slider" aria-label="拖动调整笔记框大小" tabIndex={0} onPointerDown={beginPanelResize}>↘</span>
             {codexReadyId === detailMistake.id && <div className="codex-help"><b>{companionStatus?.connected ? (codexBusy ? 'Codex 正在分析这道题…' : codexAnalysis ? 'Codex 分析已完成' : '本地 Codex 已连接') : siteToolsSupported ? 'Codex 已能读取这道题' : '尚未连接本地 408 AI 助手'}</b><span>{companionStatus?.connected ? (codexBusy ? '正在读取题目图片并生成考点、错因和检查步骤，请稍候。' : codexAnalysis?.analysis || '点击“AI 分析”后会直接调用你的 Codex 订阅，不需要 API。') : siteToolsSupported ? '回到旁边的对话，粘贴或直接说“帮我分析当前错题”。' : '请从桌面启动“408 AI 错题助手”；没有本地助手时仍可复制提问。'}</span></div>}
             <div className="dialog-actions detail-actions"><button className="dialog-cancel" onClick={() => setDetailMistake(null)} disabled={detailSaving || codexBusy}>关闭</button><button className="codex-button" onClick={() => void prepareCodexQuestion()} disabled={detailSaving || codexBusy}>{codexBusy ? '分析中…' : companionStatus?.connected ? '✦ AI 分析' : '✦ 问 Codex'}</button><button className="dialog-connect" onClick={() => void saveMistakeDetail()} disabled={detailSaving || codexBusy}>{detailSaving ? '正在保存…' : '保存修改'}</button></div>
