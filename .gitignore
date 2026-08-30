@@ -3,4 +3,5 @@ dist/
 *.local
 *.tsbuildinfo
 .DS_Store
+private-upload/
 
