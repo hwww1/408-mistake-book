@@ -473,6 +473,7 @@ export default function Home() {
   const [detailNote, setDetailNote] = useState('');
   const [detailNoteExpanded, setDetailNoteExpanded] = useState(false);
   const [detailSaving, setDetailSaving] = useState(false);
+  const [detailPanelMode, setDetailPanelMode] = useState<'docked' | 'floating'>('docked');
   const [detailPanelPosition, setDetailPanelPosition] = useState<{ x: number; y: number } | null>(null);
   const [detailPanelSize, setDetailPanelSize] = useState<{ width: number; height: number } | null>(null);
   const [codexReadyId, setCodexReadyId] = useState('');
@@ -1219,6 +1220,9 @@ export default function Home() {
     setDetailReason(mistake.reason === '未填写' ? '' : mistake.reason);
     setDetailNote(mistake.note || '');
     setDetailNoteExpanded(false);
+    setDetailPanelMode('docked');
+    setDetailPanelPosition(null);
+    setDetailPanelSize(null);
     setCodexReadyId('');
     setCodexAnalysis(null);
   }
@@ -1229,6 +1233,7 @@ export default function Home() {
   }
 
   function beginPanelDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (detailPanelMode !== 'floating') return;
     if ((event.target as HTMLElement).closest('button')) return;
     const dialog = detailDialogRef.current?.getBoundingClientRect();
     const panel = detailEditorRef.current?.getBoundingClientRect();
@@ -1267,7 +1272,14 @@ export default function Home() {
     setDetailPanelSize(null);
   }
 
+  function toggleDetailPanelMode() {
+    setDetailPanelMode((mode) => mode === 'docked' ? 'floating' : 'docked');
+    setDetailPanelPosition(null);
+    setDetailPanelSize(null);
+  }
+
   function beginPanelResize(event: ReactPointerEvent<HTMLSpanElement>) {
+    if (detailPanelMode !== 'floating') return;
     const dialog = detailDialogRef.current;
     const panel = detailEditorRef.current;
     if (!dialog || !panel) return;
@@ -1614,18 +1626,18 @@ export default function Home() {
         </section>
       </div>}
       {detailMistake && <div className="modal-backdrop mistake-detail-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !detailSaving && !codexBusy) setDetailMistake(null); }}>
-        <section ref={detailDialogRef} className="mistake-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="mistake-detail-title">
+        <section ref={detailDialogRef} className={`mistake-detail-dialog panel-${detailPanelMode}`} role="dialog" aria-modal="true" aria-labelledby="mistake-detail-title">
           <button className="dialog-close" onClick={() => setDetailMistake(null)} disabled={detailSaving || codexBusy} aria-label="关闭">×</button>
           <div className="mistake-detail-image"><MistakeImage image={detailMistake.image} alt={`${detailMistake.section} ${detailMistake.questionNo || ''}`} /><div className="mistake-detail-nav"><button disabled={!detailNavigation.previous} onClick={() => navigateMistake(detailNavigation.previous)}>← 上一题</button><span>{detailNavigation.index + 1} / {detailNavigation.items.length}</span><button disabled={!detailNavigation.next} onClick={() => navigateMistake(detailNavigation.next)}>下一题 →</button></div></div>
-          <div ref={detailEditorRef} className="mistake-detail-editor" style={{ ...(detailPanelPosition ? { left: detailPanelPosition.x, top: detailPanelPosition.y, right: 'auto' } : {}), ...(detailPanelSize || {}) }}>
-            <div className="note-window-handle" onPointerDown={beginPanelDrag} onPointerMove={movePanel} onPointerUp={endPanelDrag} onPointerCancel={endPanelDrag}><span>⠿ 按住这里移动笔记框</span><button type="button" onClick={resetDetailPanel}>恢复默认</button></div>
+          <div ref={detailEditorRef} className="mistake-detail-editor" style={detailPanelMode === 'floating' ? { ...(detailPanelPosition ? { left: detailPanelPosition.x, top: detailPanelPosition.y, right: 'auto' } : {}), ...(detailPanelSize || {}) } : undefined}>
+            <div className="note-window-handle" onPointerDown={beginPanelDrag} onPointerMove={movePanel} onPointerUp={endPanelDrag} onPointerCancel={endPanelDrag}><span>{detailPanelMode === 'docked' ? '笔记停靠右侧 · 不遮挡题目' : '⠿ 按住这里移动笔记框'}</span><div><button type="button" onClick={toggleDetailPanelMode}>{detailPanelMode === 'docked' ? '自由移动' : '停靠右侧'}</button>{detailPanelMode === 'floating' && <button type="button" onClick={resetDetailPanel}>恢复默认</button>}</div></div>
             <span className="dialog-kicker">错题详情</span>
             <h2 id="mistake-detail-title">{displayQuestionNo(detailMistake.questionNo)}</h2>
             <p>{detailMistake.subject} · {detailMistake.chapter}<br />{detailMistake.section} · 第 {detailMistake.page} 页</p>
             <label>错误原因<select value={detailReason} onChange={(event) => setDetailReason(event.target.value)}><option value="">请选择</option>{REASONS.map((item) => <option key={item}>{item}</option>)}</select></label>
             <div className="detail-note-heading"><b>我的笔记</b><button type="button" onClick={() => setDetailNoteExpanded((expanded) => !expanded)}>{detailNoteExpanded ? '收起笔记' : '展开笔记'}</button></div>
-            {detailNoteExpanded ? <label className="detail-note-field"><span>拖动整个框的右下角可自由缩放</span><textarea value={detailNote} onChange={(event) => setDetailNote(event.target.value)} placeholder="补充正确思路、易错点或复习记录…" /></label> : <button type="button" className="detail-note-preview" onClick={() => setDetailNoteExpanded(true)}>{detailNote ? `${detailNote.slice(0, 70)}${detailNote.length > 70 ? '…' : ''}` : '暂无笔记，点击展开后添加'}</button>}
-            <span className="panel-resize-hint" role="slider" aria-label="拖动调整笔记框大小" tabIndex={0} onPointerDown={beginPanelResize}>↘</span>
+            {detailNoteExpanded ? <label className="detail-note-field"><span>{detailPanelMode === 'docked' ? '笔记已停靠，不会遮挡题目' : '拖动整个框的右下角可自由缩放'}</span><textarea value={detailNote} onChange={(event) => setDetailNote(event.target.value)} placeholder="补充正确思路、易错点或复习记录…" /></label> : <button type="button" className="detail-note-preview" onClick={() => setDetailNoteExpanded(true)}>{detailNote ? `${detailNote.slice(0, 70)}${detailNote.length > 70 ? '…' : ''}` : '暂无笔记，点击展开后添加'}</button>}
+            {detailPanelMode === 'floating' && <span className="panel-resize-hint" role="slider" aria-label="拖动调整笔记框大小" tabIndex={0} onPointerDown={beginPanelResize}>↘</span>}
             {codexReadyId === detailMistake.id && <div className="codex-help"><b>{companionStatus?.connected ? (codexBusy ? 'Codex 正在分析这道题…' : codexAnalysis ? 'Codex 分析已完成' : '本地 Codex 已连接') : siteToolsSupported ? 'Codex 已能读取这道题' : '尚未连接本地 408 AI 助手'}</b><span>{companionStatus?.connected ? (codexBusy ? '正在读取题目图片并生成考点、错因和检查步骤，请稍候。' : codexAnalysis?.analysis || '点击“AI 分析”后会直接调用你的 Codex 订阅，不需要 API。') : siteToolsSupported ? '回到旁边的对话，粘贴或直接说“帮我分析当前错题”。' : '请从桌面启动“408 AI 错题助手”；没有本地助手时仍可复制提问。'}</span></div>}
             <div className="dialog-actions detail-actions"><button className="dialog-cancel" onClick={() => setDetailMistake(null)} disabled={detailSaving || codexBusy}>关闭</button><button className="codex-button" onClick={() => void prepareCodexQuestion()} disabled={detailSaving || codexBusy}>{codexBusy ? '分析中…' : companionStatus?.connected ? '✦ AI 分析' : '✦ 问 Codex'}</button><button className="dialog-connect" onClick={() => void saveMistakeDetail()} disabled={detailSaving || codexBusy}>{detailSaving ? '正在保存…' : '保存修改'}</button></div>
           </div>
